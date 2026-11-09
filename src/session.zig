@@ -881,7 +881,7 @@ fn applyWorkspaceMetadata(ws: *Workspace, obj: std.json.ObjectMap) void {
     if (jsonStr(obj, "tab_uuid")) |id| {
         if (id.len == uuid.len) {
             var candidate: [uuid.len]u8 = undefined;
-            @memcpy(&candidate, id[0..uuid.len]);
+            @memcpy(candidate[0..], id[0..uuid.len]);
             // Keep the minted fresh UUID if the file smuggles a duplicate.
             if (uuid.claim(&candidate)) ws.tab_uuid = candidate;
         }
@@ -917,7 +917,7 @@ fn restorePaneUuid(panel: Panel, obj: std.json.ObjectMap) void {
     if (id.len != uuid.len) return;
     const pane = panel.asTerminal() orelse return;
     var candidate: [uuid.len]u8 = undefined;
-    @memcpy(&candidate, id[0..uuid.len]);
+    @memcpy(candidate[0..], id[0..uuid.len]);
     // Keep the minted fresh UUID if the file smuggles a duplicate.
     if (uuid.claim(&candidate)) pane.pane_uuid = candidate;
 }

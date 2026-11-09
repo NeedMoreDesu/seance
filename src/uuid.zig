@@ -45,7 +45,10 @@ pub fn claim(id: *const [len]u8) bool {
 pub fn generate(buf: *[len]u8) void {
     while (true) {
         var raw: [16]u8 = undefined;
-        std.crypto.random.bytes(&raw);
+        const rc = std.c.getrandom(&raw, raw.len, 0);
+        if (rc < 0 or @as(usize, @intCast(rc)) != raw.len) {
+            @panic("uuid: entropy unavailable");
+        }
         raw[6] = (raw[6] & 0x0f) | 0x40; // version 4
         raw[8] = (raw[8] & 0x3f) | 0x80; // variant 1
 
@@ -93,7 +96,7 @@ test "generate: produces 36-char v4 uuid, distinct calls differ" {
     try testing.expectEqualSlices(u8, "-", a[23..24]);
     try testing.expect(!std.mem.eql(u8, &a, &b));
     for (a) |ch| {
-        try testing.expect(std.ascii.isHexDigit(ch) or ch == '-');
+        try testing.expect(std.ascii.isHex(ch) or ch == '-');
     }
 }
 

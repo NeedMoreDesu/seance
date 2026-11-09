@@ -608,8 +608,9 @@ pub const SocketServer = struct {
 
                             const is_selected = (grp.active_panel == panel_idx);
 
-                            W.print(&result_buf, &pos, &overflow, "{{\"id\":{d},\"title\":\"{s}\",\"cwd\":\"{s}\",\"selected\":{s},\"focused\":{s}}}", .{
+                            W.print(&result_buf, &pos, &overflow, "{{\"id\":{d},\"pane_uuid\":\"{s}\",\"title\":\"{s}\",\"cwd\":\"{s}\",\"selected\":{s},\"focused\":{s}}}", .{
                                 pane.id,
+                                pane.pane_uuid[0..],
                                 escaped_title,
                                 escaped_cwd,
                                 if (is_selected) "true" else "false",
@@ -755,9 +756,10 @@ pub const SocketServer = struct {
             } else "";
 
             const panel_count: usize = if (ws.focusedGroup()) |fg| fg.panels.items.len else 0;
-            const entry = std.fmt.bufPrint(result_buf[pos..], "{{\"id\":{d},\"index\":{d},\"title\":\"{s}\",\"active\":{s},\"pinned\":{s},\"panel_count\":{d},\"cwd\":\"{s}\"{s}}}", .{
+            const entry = std.fmt.bufPrint(result_buf[pos..], "{{\"id\":{d},\"index\":{d},\"tab_uuid\":\"{s}\",\"title\":\"{s}\",\"active\":{s},\"pinned\":{s},\"panel_count\":{d},\"cwd\":\"{s}\"{s}}}", .{
                 ws.id,
                 i,
+                ws.tab_uuid[0..],
                 escaped_title,
                 if (i == state.active_workspace) "true" else "false",
                 if (ws.is_pinned) "true" else "false",

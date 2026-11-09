@@ -731,10 +731,10 @@ fn initSurface(pane: *Pane, width: u32, height: u32) void {
     // Stable identities for external session tooling (zmx): the pane's own
     // UUID is always present; the owning tab's UUID is resolved via the
     // window manager lookup below.
-    var tab_uuid_buf: [uuid.len + 1]u8 = undefined;
+    var tab_uuid_buf: [uuid.len + 1:0]u8 = undefined;
     var tab_uuid_val: ?[*:0]const u8 = null;
-    var pane_uuid_buf: [uuid.len + 1]u8 = undefined;
-    @memcpy(&pane_uuid_buf[0..uuid.len], &pane.pane_uuid);
+    var pane_uuid_buf: [uuid.len + 1:0]u8 = undefined;
+    @memcpy(pane_uuid_buf[0..uuid.len], pane.pane_uuid[0..]);
     pane_uuid_buf[uuid.len] = 0;
     const pane_uuid_val: [*:0]const u8 = &pane_uuid_buf;
 
@@ -800,7 +800,7 @@ fn initSurface(pane: *Pane, width: u32, height: u32) void {
             for (state.workspaces.items) |ws| {
                 if (ws.id == pane.workspace_id) {
                     if (ws.tab_uuid[0] != 0) {
-                        @memcpy(&tab_uuid_buf[0..uuid.len], &ws.tab_uuid);
+                        @memcpy(tab_uuid_buf[0..uuid.len], ws.tab_uuid[0..]);
                         tab_uuid_buf[uuid.len] = 0;
                         tab_uuid_val = &tab_uuid_buf;
                     }

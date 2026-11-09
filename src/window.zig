@@ -259,7 +259,7 @@ pub const WindowState = struct {
                         buf[pos] = ' ';
                         pos += 1;
                     }
-                    @memcpy(buf[pos..][0..uuid_mod.len], &pane.pane_uuid);
+                    @memcpy(buf[pos..][0..uuid_mod.len], pane.pane_uuid[0..]);
                     pos += uuid_mod.len;
                 }
             }
@@ -272,7 +272,7 @@ pub const WindowState = struct {
     fn runTabHook(hook_name: [*:0]const u8, cmd: []const u8, tab_uuid: [36]u8, ws_id: u64, title: []const u8, pane_uuids: ?[*:0]const u8) void {
         if (cmd.len == 0) return;
 
-        var cmd_buf: [1025]u8 = undefined;
+        var cmd_buf: [1025:0]u8 = undefined;
         if (cmd.len >= cmd_buf.len) {
             std.log.warn("hooks: {s} command too long", .{hook_name});
             return;
@@ -281,7 +281,7 @@ pub const WindowState = struct {
         cmd_buf[cmd.len] = 0;
 
         var uuid_z: [37]u8 = undefined;
-        @memcpy(uuid_z[0..36], &tab_uuid);
+        @memcpy(uuid_z[0..36], tab_uuid[0..]);
         uuid_z[36] = 0;
 
         var title_buf: [129]u8 = undefined;
@@ -292,16 +292,16 @@ pub const WindowState = struct {
         var wsid_buf: [64]u8 = undefined;
         const wsid_z: [*:0]const u8 = std.fmt.bufPrintZ(&wsid_buf, "{d}", .{ws_id}) catch return;
 
-        var envp: [*]const ?[*:0]const u8 = c.g_get_environ();
-        envp = @ptrCast(c.g_environ_setenv(@ptrCast(envp), "SEANCE_HOOK", hook_name, 1));
-        envp = @ptrCast(c.g_environ_setenv(@ptrCast(envp), "SEANCE_TAB_UUID", &uuid_z, 1));
-        envp = @ptrCast(c.g_environ_setenv(@ptrCast(envp), "SEANCE_WORKSPACE_ID", wsid_z, 1));
-        envp = @ptrCast(c.g_environ_setenv(@ptrCast(envp), "SEANCE_TAB_TITLE", &title_buf, 1));
-        if (pane_uuids) |pu| envp = @ptrCast(c.g_environ_setenv(@ptrCast(envp), "SEANCE_PANE_UUIDS", pu, 1));
+        var envp = c.g_get_environ();
+        envp = c.g_environ_setenv(envp, "SEANCE_HOOK", hook_name, 1);
+        envp = c.g_environ_setenv(envp, "SEANCE_TAB_UUID", &uuid_z, 1);
+        envp = c.g_environ_setenv(envp, "SEANCE_WORKSPACE_ID", wsid_z, 1);
+        envp = c.g_environ_setenv(envp, "SEANCE_TAB_TITLE", &title_buf, 1);
+        if (pane_uuids) |pu| envp = c.g_environ_setenv(envp, "SEANCE_PANE_UUIDS", pu, 1);
 
         var argv = [_:null]?[*:0]const u8{ "bash", "-c", &cmd_buf, null };
         const ok = c.g_spawn_async(null, @ptrCast(&argv), envp, c.G_SPAWN_SEARCH_PATH, null, null, null, null);
-        c.g_strfreev(@ptrCast(envp));
+        c.g_strfreev(envp);
         if (ok == 0) std.log.warn("hooks: failed to spawn {s} command", .{hook_name});
     }
 
