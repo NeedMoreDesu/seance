@@ -4,6 +4,7 @@ const PaneGroup = @import("pane_group.zig").PaneGroup;
 const Pane = @import("pane.zig").Pane;
 const Panel = @import("panel.zig").Panel;
 const Column = @import("column.zig").Column;
+const uuid = @import("uuid.zig");
 
 pub const StatusEntry = struct {
     key: [64]u8 = undefined,
@@ -203,6 +204,10 @@ pub const Workspace = struct {
     ports_len: usize = 0,
     is_pinned: bool = false,
     port_ordinal: u32 = std.math.maxInt(u32),
+    /// Stable per-tab identity: random UUID (36 chars), persisted in
+    /// session.json. Survives restarts so external tools (zmx sessions,
+    /// lifecycle hooks) can key on it. All-zero until minted.
+    tab_uuid: [uuid.len]u8 = [_]u8{0} ** uuid.len,
 
     // Sidebar metadata (ephemeral, not persisted)
     metadata: WorkspaceMetadata = .{},
@@ -334,6 +339,7 @@ pub const Workspace = struct {
             .columns = .empty,
             .alloc = alloc,
         };
+        uuid.generate(&ws.tab_uuid);
         ws.setTitle(title);
 
         ws.tick_callback_id = c.gtk_widget_add_tick_callback(
@@ -361,6 +367,7 @@ pub const Workspace = struct {
             .columns = .empty,
             .alloc = alloc,
         };
+        uuid.generate(&ws.tab_uuid);
         ws.setTitle("Terminal");
 
         ws.tick_callback_id = c.gtk_widget_add_tick_callback(

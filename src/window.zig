@@ -235,11 +235,93 @@ pub const WindowState = struct {
 
         self.sidebar.refresh();
         self.selectWorkspace(target_idx);
+        self.fireOpenHook(ws);
+    }
+
+    fn fireOpenHook(self: *WindowState, ws: *Workspace) void {
+        _ = self;
+        const cfg = config_mod.get();
+        runTabHook("open", cfg.hook_on_tab_open[0..cfg.hook_on_tab_open_len], ws.tab_uuid, ws.id, ws.getTitle(), null);
+    }
+
+    /// Collect the space-separated pane UUIDs of every terminal in the
+    /// workspace (columns → groups → panels), for the close hook env.
+    fn collectPaneUuids(ws: *Workspace, buf: []u8) []const u8 {
+        const uuid_mod = @import("uuid.zig");
+        var pos: usize = 0;
+        for (ws.columns.items) |*col| {
+            for (col.groups.items) |grp| {
+                for (grp.panels.items) |panel| {
+                    const pane = panel.asTerminal() orelse continue;
+                    if (pane.pane_uuid[0] == 0) continue;
+                    if (pos + uuid_mod.len + 1 > buf.len) return buf[0..pos];
+                    if (pos > 0) {
+                        buf[pos] = ' ';
+                        pos += 1;
+                    }
+                    @memcpy(buf[pos..][0..uuid_mod.len], &pane.pane_uuid);
+                    pos += uuid_mod.len;
+                }
+            }
+        }
+        return buf[0..pos];
+    }
+
+    /// Run a [hooks] tab-lifecycle command via `bash -c`. Detached spawn;
+    /// never blocks the UI. Errors are logged only.
+    fn runTabHook(hook_name: [*:0]const u8, cmd: []const u8, tab_uuid: [36]u8, ws_id: u64, title: []const u8, pane_uuids: ?[*:0]const u8) void {
+        if (cmd.len == 0) return;
+
+        var cmd_buf: [1025]u8 = undefined;
+        if (cmd.len >= cmd_buf.len) {
+            std.log.warn("hooks: {s} command too long", .{hook_name});
+            return;
+        }
+        @memcpy(cmd_buf[0..cmd.len], cmd);
+        cmd_buf[cmd.len] = 0;
+
+        var uuid_z: [37]u8 = undefined;
+        @memcpy(uuid_z[0..36], &tab_uuid);
+        uuid_z[36] = 0;
+
+        var title_buf: [129]u8 = undefined;
+        const tlen = @min(title.len, 128);
+        @memcpy(title_buf[0..tlen], title[0..tlen]);
+        title_buf[tlen] = 0;
+
+        var wsid_buf: [64]u8 = undefined;
+        const wsid_z: [*:0]const u8 = std.fmt.bufPrintZ(&wsid_buf, "{d}", .{ws_id}) catch return;
+
+        var envp: [*]const ?[*:0]const u8 = c.g_get_environ();
+        envp = @ptrCast(c.g_environ_setenv(@ptrCast(envp), "SEANCE_HOOK", hook_name, 1));
+        envp = @ptrCast(c.g_environ_setenv(@ptrCast(envp), "SEANCE_TAB_UUID", &uuid_z, 1));
+        envp = @ptrCast(c.g_environ_setenv(@ptrCast(envp), "SEANCE_WORKSPACE_ID", wsid_z, 1));
+        envp = @ptrCast(c.g_environ_setenv(@ptrCast(envp), "SEANCE_TAB_TITLE", &title_buf, 1));
+        if (pane_uuids) |pu| envp = @ptrCast(c.g_environ_setenv(@ptrCast(envp), "SEANCE_PANE_UUIDS", pu, 1));
+
+        var argv = [_:null]?[*:0]const u8{ "bash", "-c", &cmd_buf, null };
+        const ok = c.g_spawn_async(null, @ptrCast(&argv), envp, c.G_SPAWN_SEARCH_PATH, null, null, null, null);
+        c.g_strfreev(@ptrCast(envp));
+        if (ok == 0) std.log.warn("hooks: failed to spawn {s} command", .{hook_name});
     }
 
     pub fn closeWorkspace(self: *WindowState, index: usize) void {
         if (index >= self.workspaces.items.len) return;
         const ws = self.workspaces.items[index];
+
+        // Capture hook payload before teardown frees the workspace.
+        const hook_ws_id = ws.id;
+        const hook_tab_uuid = ws.tab_uuid;
+        var hook_title_buf: [128]u8 = undefined;
+        const hook_title = blk: {
+            const t = ws.getTitle();
+            const n = @min(t.len, hook_title_buf.len);
+            @memcpy(hook_title_buf[0..n], t[0..n]);
+            break :blk hook_title_buf[0..n];
+        };
+        var pu_buf: [4097]u8 = undefined;
+        const pu = collectPaneUuids(ws, pu_buf[0 .. pu_buf.len - 1]);
+        const pu_z = std.fmt.bufPrintZ(&pu_buf, "{s}", .{pu}) catch "";
 
         // Clear workspace history if it points to the closing workspace
         if (self.last_workspace_id) |lid| {
@@ -277,6 +359,9 @@ pub const WindowState = struct {
             }
             self.sidebar.setActive(self.active_workspace);
         }
+
+        const cfg = config_mod.get();
+        runTabHook("close", cfg.hook_on_tab_close[0..cfg.hook_on_tab_close_len], hook_tab_uuid, hook_ws_id, hook_title, pu_z.ptr);
     }
 
     /// Detach a workspace from this window without destroying it.
@@ -1150,6 +1235,7 @@ pub const WindowState = struct {
 
         self.sidebar.refresh();
         self.selectWorkspace(target_idx);
+        self.fireOpenHook(ws);
     }
 
     /// Build the CSD chrome: adw header bar with add/notif/hide/settings

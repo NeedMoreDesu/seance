@@ -9,6 +9,16 @@
 # Prepend seance bin dir to PATH (for claude wrapper, etc.)
 [[ -n "$SEANCE_BIN_DIR" && -d "$SEANCE_BIN_DIR" ]] && export PATH="$SEANCE_BIN_DIR:$PATH"
 
+# zmx: one persistent session per terminal, named by the pane UUID minted
+# by seance (SEANCE_PANE_UUID). The outer pane shell exec's into the attach
+# client; the session's own shell (ZMX_SESSION == this pane's session) falls
+# through and loads normally. Tabs/splits/windows never share a session:
+# every terminal mints its own UUID.
+if [[ -n "${SEANCE_ZMX_ATTACH:-}" && -n "${SEANCE_PANE_UUID:-}" && "${ZMX_SESSION:-}" != "seance-${SEANCE_PANE_UUID}" ]]; then
+    exec zmx attach --labels "tab=${SEANCE_TAB_UUID:-none} pane=${SEANCE_PANE_UUID}" \
+        "seance-${SEANCE_PANE_UUID}" bash --posix
+fi
+
 # Restore scrollback from previous session (runs once at shell startup)
 _seance_restore_scrollback_once() {
     local path="${SEANCE_RESTORE_SCROLLBACK_FILE:-}"
@@ -101,6 +111,14 @@ _seance_bash_preexec_hook() {
 }
 
 _seance_prompt_command() {
+    # Inside a zmx session, re-heal the leader client's environment every
+    # prompt: after re-attaching following a seance restart, SEANCE_* ids
+    # (socket, surface, workspace) refer to the CURRENT windows, not the
+    # stale ones captured when the session was created.
+    if [[ -n "${SEANCE_ZMX_ATTACH:-}" && -n "${ZMX_SESSION:-}" ]]; then
+        eval "$(zmx print-env -s . 2>/dev/null)" 2>/dev/null || true
+    fi
+
     [[ -S "$SEANCE_SOCKET_PATH" ]] || return 0
     [[ -n "$SEANCE_PANE_GROUP_ID" ]] || return 0
     [[ -n "$SEANCE_PANEL_ID" ]] || return 0

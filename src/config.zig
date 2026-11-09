@@ -71,6 +71,21 @@ pub const Config = struct {
     // Antigravity CLI integration
     antigravity_hooks: bool = true,
 
+    // zmx integration: every terminal pane exec's `zmx attach
+    // seance-<pane-uuid>` as its shell, giving each terminal a persistent
+    // session keyed on its UUID (survives seance restarts for re-attach).
+    zmx_attach: bool = false,
+
+    // Lifecycle hooks — shell commands run via `bash -c` on tab
+    // open/close. NOT fired on session restore or window/app close.
+    // Environment: SEANCE_HOOK (open|close), SEANCE_TAB_UUID,
+    // SEANCE_WORKSPACE_ID, SEANCE_TAB_TITLE, SEANCE_PANE_UUIDS
+    // (space-separated pane UUIDs, close hook only).
+    hook_on_tab_open: [1024]u8 = [_]u8{0} ** 1024,
+    hook_on_tab_open_len: usize = 0,
+    hook_on_tab_close: [1024]u8 = [_]u8{0} ** 1024,
+    hook_on_tab_close_len: usize = 0,
+
     // Notifications
     notification_sound: NotificationSound = .default,
 
@@ -280,6 +295,12 @@ pub fn saveConfig(cfg: *const Config) void {
     writeBool(w, "pi-hooks", cfg.pi_hooks) catch return;
     writeBool(w, "opencode-hooks", cfg.opencode_hooks) catch return;
     writeBool(w, "antigravity-hooks", cfg.antigravity_hooks) catch return;
+    writeBool(w, "zmx-attach", cfg.zmx_attach) catch return;
+
+    // [hooks]
+    w.print("\n[hooks]\n", .{}) catch return;
+    w.print("on-tab-open = \"{s}\"\n", .{cfg.hook_on_tab_open[0..cfg.hook_on_tab_open_len]}) catch return;
+    w.print("on-tab-close = \"{s}\"\n", .{cfg.hook_on_tab_close[0..cfg.hook_on_tab_close_len]}) catch return;
 
     // [notifications]
     w.print("\n[notifications]\n", .{}) catch return;
@@ -375,7 +396,7 @@ fn parseToml(config: *Config, content: []const u8) void {
 }
 
 fn isKnownSection(section: []const u8) bool {
-    const known = [_][]const u8{ "font", "colors", "window", "sidebar", "terminal", "behavior", "notifications", "socket", "keybinds" };
+    const known = [_][]const u8{ "font", "colors", "window", "sidebar", "terminal", "behavior", "hooks", "notifications", "socket", "keybinds" };
     for (known) |s| {
         if (eql(section, s)) return true;
     }
@@ -495,6 +516,17 @@ fn applyValue(config: *Config, section: []const u8, key: []const u8, raw_val: []
             return true;
         } else if (eql(key, "antigravity-hooks")) {
             config.antigravity_hooks = parseBool(val) orelse config.antigravity_hooks;
+            return true;
+        } else if (eql(key, "zmx-attach")) {
+            config.zmx_attach = parseBool(val) orelse config.zmx_attach;
+            return true;
+        }
+    } else if (eql(section, "hooks")) {
+        if (eql(key, "on-tab-open")) {
+            setStr(&config.hook_on_tab_open, &config.hook_on_tab_open_len, val);
+            return true;
+        } else if (eql(key, "on-tab-close")) {
+            setStr(&config.hook_on_tab_close, &config.hook_on_tab_close_len, val);
             return true;
         }
     } else if (eql(section, "notifications")) {

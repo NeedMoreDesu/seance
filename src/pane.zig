@@ -5,6 +5,7 @@ const config_mod = @import("config.zig");
 const SearchOverlay = @import("search_overlay.zig").SearchOverlay;
 const ghostty_bridge = @import("ghostty_bridge.zig");
 const ime_state = @import("ime_state.zig");
+const uuid = @import("uuid.zig");
 
 pub const Pane = struct {
     pub const cwd_cap = 512;
@@ -12,6 +13,10 @@ pub const Pane = struct {
     id: u64,
     workspace_id: u64,
     pane_group_id: u64,
+    /// Stable per-pane identity: random UUID (36 chars), persisted in
+    /// session.json. Names this pane's zmx session; survives restarts so
+    /// re-attaching seance re-binds each pane to its own session.
+    pane_uuid: [uuid.len]u8 = [_]u8{0} ** uuid.len,
     surface: c.ghostty_surface_t = null,
     gl_area: ?*c.GtkGLArea = null,
     // Owned reference: GTK can retain focus controllers past widget teardown.
@@ -116,6 +121,7 @@ pub const Pane = struct {
             .gl_area = gl_area,
             .widget = wrapper,
         };
+        uuid.generate(&pane.pane_uuid);
         c.g_object_set_data(@as(*c.GObject, @ptrCast(gl_area_widget)), "seance-pane", @ptrCast(pane));
 
         // Weak pointer: when gl_area is finalized (e.g. after
@@ -722,6 +728,16 @@ fn initSurface(pane: *Pane, width: u32, height: u32) void {
     const panel_key = "SEANCE_PANEL_ID";
     const panel_val: [*:0]const u8 = std.fmt.bufPrintZ(panel_buf[0..63], "{d}", .{pane.id}) catch "0";
 
+    // Stable identities for external session tooling (zmx): the pane's own
+    // UUID is always present; the owning tab's UUID is resolved via the
+    // window manager lookup below.
+    var tab_uuid_buf: [uuid.len + 1]u8 = undefined;
+    var tab_uuid_val: ?[*:0]const u8 = null;
+    var pane_uuid_buf: [uuid.len + 1]u8 = undefined;
+    @memcpy(&pane_uuid_buf[0..uuid.len], &pane.pane_uuid);
+    pane_uuid_buf[uuid.len] = 0;
+    const pane_uuid_val: [*:0]const u8 = &pane_uuid_buf;
+
     // Socket path
     const socket_server = @import("socket_server.zig");
     var socket_path_raw: [std.fs.max_path_bytes]u8 = undefined;
@@ -782,18 +798,25 @@ fn initSurface(pane: *Pane, width: u32, height: u32) void {
     if (Window.window_manager) |wm| {
         if (wm.findByWorkspaceId(pane.workspace_id)) |state| {
             for (state.workspaces.items) |ws| {
-                if (ws.id == pane.workspace_id and ws.port_ordinal != std.math.maxInt(u32)) {
-                    const port_start = cfg.port_base + ws.port_ordinal * cfg.port_range;
-                    const port_end = port_start + cfg.port_range - 1;
-                    if (std.fmt.bufPrintZ(&port_buf, "{d}", .{port_start})) |v| {
-                        port_val = v;
-                    } else |_| {}
-                    if (std.fmt.bufPrintZ(&port_end_buf, "{d}", .{port_end})) |v| {
-                        port_end_val = v;
-                    } else |_| {}
-                    if (std.fmt.bufPrintZ(&port_range_buf, "{d}", .{cfg.port_range})) |v| {
-                        port_range_val = v;
-                    } else |_| {}
+                if (ws.id == pane.workspace_id) {
+                    if (ws.tab_uuid[0] != 0) {
+                        @memcpy(&tab_uuid_buf[0..uuid.len], &ws.tab_uuid);
+                        tab_uuid_buf[uuid.len] = 0;
+                        tab_uuid_val = &tab_uuid_buf;
+                    }
+                    if (ws.port_ordinal != std.math.maxInt(u32)) {
+                        const port_start = cfg.port_base + ws.port_ordinal * cfg.port_range;
+                        const port_end = port_start + cfg.port_range - 1;
+                        if (std.fmt.bufPrintZ(&port_buf, "{d}", .{port_start})) |v| {
+                            port_val = v;
+                        } else |_| {}
+                        if (std.fmt.bufPrintZ(&port_end_buf, "{d}", .{port_end})) |v| {
+                            port_end_val = v;
+                        } else |_| {}
+                        if (std.fmt.bufPrintZ(&port_range_buf, "{d}", .{cfg.port_range})) |v| {
+                            port_range_val = v;
+                        } else |_| {}
+                    }
                     break;
                 }
             }
@@ -801,7 +824,7 @@ fn initSurface(pane: *Pane, width: u32, height: u32) void {
     }
 
     // Build env var array
-    var env_vars: [19]c.ghostty_env_var_s = undefined;
+    var env_vars: [24]c.ghostty_env_var_s = undefined;
     var env_count: usize = 0;
 
     env_vars[env_count] = .{ .key = ws_key, .value = ws_val };
@@ -866,6 +889,20 @@ fn initSurface(pane: *Pane, width: u32, height: u32) void {
     }
     if (port_range_val) |pv| {
         env_vars[env_count] = .{ .key = "SEANCE_PORT_RANGE", .value = pv };
+        env_count += 1;
+    }
+    if (tab_uuid_val) |v| {
+        env_vars[env_count] = .{ .key = "SEANCE_TAB_UUID", .value = v };
+        env_count += 1;
+    }
+    env_vars[env_count] = .{ .key = "SEANCE_PANE_UUID", .value = pane_uuid_val };
+    env_count += 1;
+    if (cfg.zmx_attach) {
+        env_vars[env_count] = .{ .key = "SEANCE_ZMX_ATTACH", .value = "1" };
+        env_count += 1;
+        const zmx_track_env = "DISPLAY,WAYLAND_DISPLAY,XAUTHORITY,XDG_RUNTIME_DIR,SSH_AUTH_SOCK," ++
+            "SEANCE_SOCKET_PATH,SEANCE_WORKSPACE_ID,SEANCE_SURFACE_ID,SEANCE_PANE_GROUP_ID,SEANCE_PANEL_ID,SEANCE_PORT";
+        env_vars[env_count] = .{ .key = "ZMX_TRACK_ENV", .value = zmx_track_env };
         env_count += 1;
     }
 

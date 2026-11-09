@@ -39,6 +39,17 @@
 # confirm-close-window = true
 # opencode-hooks = true          # track local OpenCode sessions (new panes)
 # antigravity-hooks = true       # track Antigravity CLI sessions (new panes)
+# zmx-attach = false             # every terminal pane execs `zmx attach
+                                 # seance-<pane-uuid>` — persistent sessions
+                                 # per terminal that survive seance restarts
+
+[hooks]
+# on-tab-open = ""               # shell command on explicit tab creation
+# on-tab-close = ""              # shell command on explicit tab close
+                                 # (not on window/app quit or session restore);
+                                 # env: SEANCE_HOOK, SEANCE_TAB_UUID,
+                                 # SEANCE_WORKSPACE_ID, SEANCE_TAB_TITLE,
+                                 # SEANCE_PANE_UUIDS (close only)
 
 [notifications]
 # sound = "default"              # "default", "none", or path to .wav/.ogg file

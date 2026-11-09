@@ -6,6 +6,7 @@ const Pane = @import("pane.zig").Pane;
 const Panel = @import("panel.zig").Panel;
 const PaneGroup = @import("pane_group.zig").PaneGroup;
 const Workspace = @import("workspace.zig").Workspace;
+const uuid = @import("uuid.zig");
 const Allocator = std.mem.Allocator;
 
 pub const MAX_SCROLLBACK_LINES: usize = 4000;
@@ -115,6 +116,8 @@ fn writeWorkspace(w: anytype, ws: *Workspace, include_scrollback: bool) !void {
     }
     try writeKvBool(w, "is_pinned", ws.is_pinned, false);
     try writeKvInt(w, "port_ordinal", @intCast(ws.port_ordinal), false);
+    if (ws.tab_uuid[0] == 0) uuid.generate(&ws.tab_uuid);
+    try writeKvStr(w, "tab_uuid", ws.tab_uuid[0..], false);
     try writeKvFloat(w, "camera", ws.camera, false);
     try w.writeAll(",\"layout\":");
     try writeLayout(w, ws, include_scrollback);
@@ -170,6 +173,8 @@ fn writePanel(w: anytype, panel: Panel, include_scrollback: bool) !void {
             } else {
                 try writeKvNull(w, "cwd", false);
             }
+            if (pane.pane_uuid[0] == 0) uuid.generate(&pane.pane_uuid);
+            try writeKvStr(w, "pane_uuid", pane.pane_uuid[0..], false);
             if (pane.custom_title_len > 0) {
                 try writeKvStr(w, "custom_title", pane.custom_title[0..pane.custom_title_len], false);
             }
@@ -831,6 +836,7 @@ fn restoreGroupPanels(group: *PaneGroup, obj: std.json.ObjectMap) void {
             else => null,
         };
         if (first_panel_obj) |fpo| {
+            restorePaneUuid(group.panels.items[0], fpo);
             restorePanelScrollback(group.panels.items[0], fpo);
             restorePanelCustomTitle(group, group.panels.items[0], fpo);
             restorePanelHeightWeight(group.panels.items[0], fpo);
@@ -849,6 +855,7 @@ fn restoreGroupPanels(group: *PaneGroup, obj: std.json.ObjectMap) void {
             const cwd = getTerminalPanelCwd(&panel_cwd_buf, panel_obj);
             const pane = group.newPanel(cwd) catch continue;
             const panel = Panel{ .terminal = pane };
+            restorePaneUuid(panel, panel_obj);
             restorePanelScrollback(panel, panel_obj);
             restorePanelCustomTitle(group, panel, panel_obj);
             restorePanelHeightWeight(panel, panel_obj);
@@ -870,6 +877,14 @@ fn applyWorkspaceMetadata(ws: *Workspace, obj: std.json.ObjectMap) void {
     if (jsonInt(obj, "port_ordinal")) |ord| {
         const clamped = @min(@max(@as(i64, 0), ord), @as(i64, std.math.maxInt(u32)));
         ws.port_ordinal = @intCast(clamped);
+    }
+    if (jsonStr(obj, "tab_uuid")) |id| {
+        if (id.len == uuid.len) {
+            var candidate: [uuid.len]u8 = undefined;
+            @memcpy(&candidate, id[0..uuid.len]);
+            // Keep the minted fresh UUID if the file smuggles a duplicate.
+            if (uuid.claim(&candidate)) ws.tab_uuid = candidate;
+        }
     }
 }
 
@@ -895,6 +910,16 @@ fn restorePanelHeightWeight(panel: Panel, obj: std.json.ObjectMap) void {
     const w = jsonFloat(obj, "height_weight") orelse return;
     const pane = panel.asTerminal() orelse return;
     pane.height_weight = std.math.clamp(w, 0.1, 10.0);
+}
+
+fn restorePaneUuid(panel: Panel, obj: std.json.ObjectMap) void {
+    const id = jsonStr(obj, "pane_uuid") orelse return;
+    if (id.len != uuid.len) return;
+    const pane = panel.asTerminal() orelse return;
+    var candidate: [uuid.len]u8 = undefined;
+    @memcpy(&candidate, id[0..uuid.len]);
+    // Keep the minted fresh UUID if the file smuggles a duplicate.
+    if (uuid.claim(&candidate)) pane.pane_uuid = candidate;
 }
 
 fn getTerminalPanelCwd(buf: *[std.fs.max_path_bytes]u8, obj: std.json.ObjectMap) ?[*:0]const u8 {
