@@ -328,6 +328,29 @@ pub const Workspace = struct {
         return .{ .container = container, .fixed = fixed };
     }
 
+    /// Space-separated pane UUIDs of every terminal in this workspace
+    /// (columns → groups → panels). Used for zmx session kills and the
+    /// on-tab-close hook's SEANCE_PANE_UUIDS env.
+    pub fn collectPaneUuids(self: *Workspace, buf: []u8) []const u8 {
+        var pos: usize = 0;
+        for (self.columns.items) |*col| {
+            for (col.groups.items) |grp| {
+                for (grp.panels.items) |panel| {
+                    const pane = panel.asTerminal() orelse continue;
+                    if (pane.pane_uuid[0] == 0) continue;
+                    if (pos + uuid.len + 1 > buf.len) return buf[0..pos];
+                    if (pos > 0) {
+                        buf[pos] = ' ';
+                        pos += 1;
+                    }
+                    @memcpy(buf[pos..][0..uuid.len], pane.pane_uuid[0..]);
+                    pos += uuid.len;
+                }
+            }
+        }
+        return buf[0..pos];
+    }
+
     pub fn create(alloc: std.mem.Allocator, title: []const u8) !*Workspace {
         const ws = try alloc.create(Workspace);
         const widgets = initWidgets();

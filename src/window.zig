@@ -244,47 +244,41 @@ pub const WindowState = struct {
         runTabHook("open", cfg.hook_on_tab_open[0..cfg.hook_on_tab_open_len], ws.tab_uuid, ws.id, ws.getTitle(), null);
     }
 
-    /// Collect the space-separated pane UUIDs of every terminal in the
-    /// workspace (columns → groups → panels), for the close hook env.
-    fn collectPaneUuids(ws: *Workspace, buf: []u8) []const u8 {
-        const uuid_mod = @import("uuid.zig");
-        var pos: usize = 0;
-        for (ws.columns.items) |*col| {
-            for (col.groups.items) |grp| {
-                for (grp.panels.items) |panel| {
-                    const pane = panel.asTerminal() orelse continue;
-                    if (pane.pane_uuid[0] == 0) continue;
-                    if (pos + uuid_mod.len + 1 > buf.len) return buf[0..pos];
-                    if (pos > 0) {
-                        buf[pos] = ' ';
-                        pos += 1;
-                    }
-                    @memcpy(buf[pos..][0..uuid_mod.len], pane.pane_uuid[0..]);
-                    pos += uuid_mod.len;
-                }
-            }
-        }
-        return buf[0..pos];
-    }
+    /// Environment key/value pair for spawnBash.
+    const EnvKv = struct { name: [*:0]const u8, value: [*:0]const u8 };
 
-    /// Run a [hooks] tab-lifecycle command via `bash -c`. Detached spawn;
-    /// never blocks the UI. Errors are logged only.
-    fn runTabHook(hook_name: [*:0]const u8, cmd: []const u8, tab_uuid: [36]u8, ws_id: u64, title: []const u8, pane_uuids: ?[*:0]const u8) void {
+    /// Run a shell command line via `bash -c` with extra env vars applied
+    /// on top of the process environment. Detached spawn; never blocks the
+    /// UI; failures are logged only.
+    fn spawnBash(label: [*:0]const u8, cmd: []const u8, envs: []const EnvKv) void {
         if (cmd.len == 0) return;
 
         var cmd_buf: [1025:0]u8 = undefined;
         if (cmd.len >= cmd_buf.len) {
-            std.log.warn("hooks: {s} command too long", .{hook_name});
+            std.log.warn("hooks: {s} command too long", .{label});
             return;
         }
         @memcpy(cmd_buf[0..cmd.len], cmd);
         cmd_buf[cmd.len] = 0;
 
-        var uuid_z: [37]u8 = undefined;
+        var envp = c.g_get_environ();
+        for (envs) |kv| envp = c.g_environ_setenv(envp, kv.name, kv.value, 1);
+
+        var argv = [_:null]?[*:0]const u8{ "bash", "-c", &cmd_buf, null };
+        const ok = c.g_spawn_async(null, @ptrCast(&argv), envp, c.G_SPAWN_SEARCH_PATH, null, null, null, null);
+        c.g_strfreev(envp);
+        if (ok == 0) std.log.warn("hooks: failed to spawn {s} command", .{label});
+    }
+
+    /// Run a [hooks] tab-lifecycle command with identifying env vars.
+    fn runTabHook(hook_name: [*:0]const u8, cmd: []const u8, tab_uuid: [36]u8, ws_id: u64, title: []const u8, pane_uuids: ?[*:0]const u8) void {
+        if (cmd.len == 0) return;
+
+        var uuid_z: [37:0]u8 = undefined;
         @memcpy(uuid_z[0..36], tab_uuid[0..]);
         uuid_z[36] = 0;
 
-        var title_buf: [129]u8 = undefined;
+        var title_buf: [129:0]u8 = undefined;
         const tlen = @min(title.len, 128);
         @memcpy(title_buf[0..tlen], title[0..tlen]);
         title_buf[tlen] = 0;
@@ -292,17 +286,54 @@ pub const WindowState = struct {
         var wsid_buf: [64]u8 = undefined;
         const wsid_z: [*:0]const u8 = std.fmt.bufPrintZ(&wsid_buf, "{d}", .{ws_id}) catch return;
 
-        var envp = c.g_get_environ();
-        envp = c.g_environ_setenv(envp, "SEANCE_HOOK", hook_name, 1);
-        envp = c.g_environ_setenv(envp, "SEANCE_TAB_UUID", &uuid_z, 1);
-        envp = c.g_environ_setenv(envp, "SEANCE_WORKSPACE_ID", wsid_z, 1);
-        envp = c.g_environ_setenv(envp, "SEANCE_TAB_TITLE", &title_buf, 1);
-        if (pane_uuids) |pu| envp = c.g_environ_setenv(envp, "SEANCE_PANE_UUIDS", pu, 1);
+        var envs: [5]EnvKv = .{
+            .{ .name = "SEANCE_HOOK", .value = hook_name },
+            .{ .name = "SEANCE_TAB_UUID", .value = &uuid_z },
+            .{ .name = "SEANCE_WORKSPACE_ID", .value = wsid_z },
+            .{ .name = "SEANCE_TAB_TITLE", .value = &title_buf },
+            .{ .name = "SEANCE_PANE_UUIDS", .value = pane_uuids orelse "" },
+        };
+        spawnBash(hook_name, cmd, &envs);
+    }
 
-        var argv = [_:null]?[*:0]const u8{ "bash", "-c", &cmd_buf, null };
-        const ok = c.g_spawn_async(null, @ptrCast(&argv), envp, c.G_SPAWN_SEARCH_PATH, null, null, null, null);
-        c.g_strfreev(envp);
-        if (ok == 0) std.log.warn("hooks: failed to spawn {s} command", .{hook_name});
+    /// Built-in zmx cleanup: kill the zmx sessions of the given terminals
+    /// (space-separated UUID list; corrupt tokens are dropped). Fired on
+    /// every EXPLICIT terminal close — pane removed, tab closed, window
+    /// closed while the app keeps running — when [behavior] zmx-attach is
+    /// on. NEVER on whole-app quit: sessions survive so the next seance
+    /// launch re-attaches to them.
+    pub fn killZmxSessions(uuids: []const u8) void {
+        const zmx_mod = @import("zmx.zig");
+        const cfg = config_mod.get();
+        if (!cfg.zmx_attach) return;
+        if (uuids.len == 0) return;
+
+        var norm_buf: [16384]u8 = undefined;
+        const norm = zmx_mod.normalizeUuidList(uuids, &norm_buf) orelse return;
+        if (norm.len == 0) return;
+
+        var norm_z: [16385:0]u8 = undefined;
+        @memcpy(norm_z[0..norm.len], norm);
+        norm_z[norm.len] = 0;
+
+        const envs = [_]EnvKv{.{ .name = "SEANCE_PANE_UUIDS", .value = &norm_z }};
+        spawnBash("zmx-kill", zmx_mod.kill_cmd_env, &envs);
+    }
+
+    /// Kill every terminal session belonging to a window that is being
+    /// closed while other windows remain (called by WindowManager.closeWindow).
+    pub fn killZmxSessionsOfWindow(win: *WindowState) void {
+        var buf: [16384]u8 = undefined;
+        var pos: usize = 0;
+        for (win.workspaces.items) |ws| {
+            const s = ws.collectPaneUuids(buf[pos..]);
+            pos += s.len;
+            if (pos < buf.len and s.len > 0) {
+                buf[pos] = ' ';
+                pos += 1;
+            }
+        }
+        killZmxSessions(buf[0..pos]);
     }
 
     pub fn closeWorkspace(self: *WindowState, index: usize) void {
@@ -319,9 +350,11 @@ pub const WindowState = struct {
             @memcpy(hook_title_buf[0..n], t[0..n]);
             break :blk hook_title_buf[0..n];
         };
-        var pu_buf: [4097]u8 = undefined;
-        const pu = collectPaneUuids(ws, pu_buf[0 .. pu_buf.len - 1]);
-        const pu_z = std.fmt.bufPrintZ(&pu_buf, "{s}", .{pu}) catch "";
+        // Collect pane UUIDs space-separated; nul-terminate IN PLACE (a
+        // bufPrintZ from pu_buf into itself would alias and panic).
+        var pu_buf: [4096:0]u8 = undefined;
+        const pu = ws.collectPaneUuids(pu_buf[0 .. pu_buf.len - 1]);
+        pu_buf[pu.len] = 0;
 
         // Clear workspace history if it points to the closing workspace
         if (self.last_workspace_id) |lid| {
@@ -361,7 +394,10 @@ pub const WindowState = struct {
         }
 
         const cfg = config_mod.get();
-        runTabHook("close", cfg.hook_on_tab_close[0..cfg.hook_on_tab_close_len], hook_tab_uuid, hook_ws_id, hook_title, pu_z.ptr);
+        // Explicit tab close: kill every terminal session this tab owned,
+        // then run the user-configured hook (if any).
+        killZmxSessions(pu);
+        runTabHook("close", cfg.hook_on_tab_close[0..cfg.hook_on_tab_close_len], hook_tab_uuid, hook_ws_id, hook_title, &pu_buf);
     }
 
     /// Detach a workspace from this window without destroying it.
@@ -492,6 +528,19 @@ pub const WindowState = struct {
             const grp = ws.findGroupContainingPane(pane_id) orelse continue;
 
             ws.clearPaneHistoryFor(pane_id);
+
+            // Explicit terminal close: kill its zmx session. This covers
+            // closes that never cascade into closeWorkspace (a split or a
+            // stacked panel closed inside a still-live tab); when the last
+            // pane goes, the cascade below kills only the remaining ones
+            // and zmx kill --force makes any overlap harmless.
+            for (grp.panels.items) |panel| {
+                const tp = panel.asTerminal() orelse continue;
+                if (tp.id == pane_id) {
+                    killZmxSessions(tp.pane_uuid[0..]);
+                    break;
+                }
+            }
 
             // Group has multiple panels — remove just this one
             if (grp.panels.items.len > 1) {

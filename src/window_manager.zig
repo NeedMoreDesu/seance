@@ -100,6 +100,11 @@ pub const WindowManager = struct {
 
         // Other windows still open — safe to clean up ghostty surfaces
         // since the main loop is still running for the remaining windows.
+        // Explicit window close: kill this window's terminal sessions
+        // first (the whole-app quit path above deliberately does NOT —
+        // sessions must survive so the next seance re-attaches).
+        Window.WindowState.killZmxSessionsOfWindow(win);
+
         for (win.workspaces.items) |ws| {
             ws.destroy();
         }

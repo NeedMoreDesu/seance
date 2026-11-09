@@ -14,8 +14,16 @@
 # client; the session's own shell (ZMX_SESSION == this pane's session) falls
 # through and loads normally. Tabs/splits/windows never share a session:
 # every terminal mints its own UUID.
-if [[ -n "${SEANCE_ZMX_ATTACH:-}" && -n "${SEANCE_PANE_UUID:-}" && "${ZMX_SESSION:-}" != "seance-${SEANCE_PANE_UUID}" ]]; then
-    exec zmx attach --labels "tab=${SEANCE_TAB_UUID:-none} pane=${SEANCE_PANE_UUID}" \
+#
+# ENV/GHOSTTY_BASH_INJECT must be re-exported for the session shell:
+# ghostty.bash UNSETS them while sourcing, and the zmx daemon captures the
+# environment at session creation — without the re-export the session's
+# bash boots bare (no rc files, no shell integration = degraded terminal).
+if [[ -n "${SEANCE_ZMX_ATTACH:-}" && -n "${SEANCE_PANE_UUID:-}" && -n "${GHOSTTY_RESOURCES_DIR:-}" && "${ZMX_SESSION:-}" != "seance-${SEANCE_PANE_UUID}" ]]; then
+    exec env -u ZMX_SESSION \
+        ENV="${GHOSTTY_RESOURCES_DIR}/shell-integration/bash/ghostty.bash" \
+        GHOSTTY_BASH_INJECT=1 \
+        zmx attach --labels "tab=${SEANCE_TAB_UUID:-none} pane=${SEANCE_PANE_UUID}" \
         "seance-${SEANCE_PANE_UUID}" bash --posix
 fi
 

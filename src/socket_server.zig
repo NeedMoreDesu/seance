@@ -817,9 +817,10 @@ pub const SocketServer = struct {
         }
 
         var result_buf: [256]u8 = undefined;
-        const result = std.fmt.bufPrint(&result_buf, "{{\"id\":{d},\"index\":{d}}}", .{
+        const result = std.fmt.bufPrint(&result_buf, "{{\"id\":{d},\"index\":{d},\"tab_uuid\":\"{s}\"}}", .{
             ws.id,
             state.active_workspace,
+            ws.tab_uuid[0..],
         }) catch return writeJsonError(buf, id, "internal", "Buffer overflow");
         return writeJsonOk(buf, id, result);
     }

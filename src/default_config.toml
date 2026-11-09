@@ -41,12 +41,18 @@
 # antigravity-hooks = true       # track Antigravity CLI sessions (new panes)
 # zmx-attach = false             # every terminal pane execs `zmx attach
                                  # seance-<pane-uuid>` — persistent sessions
-                                 # per terminal that survive seance restarts
+                                 # per terminal that survive seance restarts.
+                                 # On every EXPLICIT close (pane/tab/window
+                                 # while others remain) seance runs
+                                 # `zmx kill --force seance-<uuid>` for the
+                                 # terminals going away; whole-app quit keeps
+                                 # sessions alive for the next re-attach.
 
 [hooks]
 # on-tab-open = ""               # shell command on explicit tab creation
 # on-tab-close = ""              # shell command on explicit tab close
-                                 # (not on window/app quit or session restore);
+                                 # (not on window quit or app exit; the zmx
+                                 # kill above is built-in, this is for extras);
                                  # env: SEANCE_HOOK, SEANCE_TAB_UUID,
                                  # SEANCE_WORKSPACE_ID, SEANCE_TAB_TITLE,
                                  # SEANCE_PANE_UUIDS (close only)

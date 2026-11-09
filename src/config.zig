@@ -74,13 +74,16 @@ pub const Config = struct {
     // zmx integration: every terminal pane exec's `zmx attach
     // seance-<pane-uuid>` as its shell, giving each terminal a persistent
     // session keyed on its UUID (survives seance restarts for re-attach).
+    // When on, seance also kills sessions of explicitly closed terminals
+    // (pane/tab/window while others remain) — never on whole-app quit.
     zmx_attach: bool = false,
 
     // Lifecycle hooks — shell commands run via `bash -c` on tab
-    // open/close. NOT fired on session restore or window/app close.
-    // Environment: SEANCE_HOOK (open|close), SEANCE_TAB_UUID,
-    // SEANCE_WORKSPACE_ID, SEANCE_TAB_TITLE, SEANCE_PANE_UUIDS
-    // (space-separated pane UUIDs, close hook only).
+    // open/close. NOT fired on session restore or window/app quit.
+    // Independent of the built-in zmx kill (which runs regardless when
+    // zmx-attach is on). Environment: SEANCE_HOOK (open|close),
+    // SEANCE_TAB_UUID, SEANCE_WORKSPACE_ID, SEANCE_TAB_TITLE,
+    // SEANCE_PANE_UUIDS (space-separated pane UUIDs, close hook only).
     hook_on_tab_open: [1024]u8 = [_]u8{0} ** 1024,
     hook_on_tab_open_len: usize = 0,
     hook_on_tab_close: [1024]u8 = [_]u8{0} ** 1024,
