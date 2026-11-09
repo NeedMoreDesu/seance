@@ -481,7 +481,10 @@ fn testZmxLifecycle(h: *Harness) TestError!void {
     var snap1: std.ArrayList([]const u8) = .empty;
     try treePaneUuids(h, &snap1);
     const u_new_tab = newUuids(snap0.items, snap1.items);
-    if (u_new_tab.len == 0) return TestError.AssertionFailed;
+    if (u_new_tab.len == 0) {
+        std.debug.print("  no new tab uuid after create\n", .{});
+        return TestError.AssertionFailed;
+    }
     try waitForMockLog(h, seance(h, u_new_tab));
 
     // 3. surface.split (focused = new tab) → THIRD terminal, own session.
@@ -494,7 +497,10 @@ fn testZmxLifecycle(h: *Harness) TestError!void {
     var snap2: std.ArrayList([]const u8) = .empty;
     try treePaneUuids(h, &snap2);
     const u_split = newUuids(snap1.items, snap2.items);
-    if (u_split.len == 0) return TestError.AssertionFailed;
+    if (u_split.len == 0) {
+        std.debug.print("  no new pane uuid after split\n", .{});
+        return TestError.AssertionFailed;
+    }
     try waitForMockLog(h, seance(h, u_split));
 
     // 4. Explicit split close → ONLY that terminal's session is killed.
@@ -511,12 +517,10 @@ fn testZmxLifecycle(h: *Harness) TestError!void {
 
     // 6. [hooks] fired with the right payload: OPEN carried the created
     // tab's UUID; CLOSE carried its tab UUID + the surviving pane UUID.
-    var hooks_buf: [16384]u8 = undefined;
-    const hooks = readFileBuf(h.hooks_log, &hooks_buf) orelse return TestError.AssertionFailed;
-    const open_needle = try std.fmt.allocPrint(h.alloc, "OPEN {s}", .{tab_uuid});
-    if (std.mem.indexOf(u8, hooks, open_needle) == null) return TestError.AssertionFailed;
-    const close_needle = try std.fmt.allocPrint(h.alloc, "CLOSE {s} {s}", .{ tab_uuid, u_new_tab });
-    if (std.mem.indexOf(u8, hooks, close_needle) == null) return TestError.AssertionFailed;
+    // Both hooks spawn `bash -c` asynchronously — poll until the
+    // expected lines land in the log.
+    try waitForLogLine(h, h.hooks_log, try std.fmt.allocPrint(h.alloc, "OPEN {s}", .{tab_uuid}));
+    try waitForLogLine(h, h.hooks_log, try std.fmt.allocPrint(h.alloc, "CLOSE {s} {s}", .{ tab_uuid, u_new_tab }));
 
     // 7. The startup tab's terminal is untouched so far → never killed.
     try expectNoMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, snap0.items[0])}));
@@ -553,7 +557,10 @@ fn testZmxQuitKeepsSessions(h: *Harness) TestError!void {
     var snap2: std.ArrayList([]const u8) = .empty;
     try treePaneUuids(h, &snap2);
     const w2_uuid = newUuids(snap.items, snap2.items);
-    if (w2_uuid.len == 0) return TestError.AssertionFailed;
+    if (w2_uuid.len == 0) {
+        std.debug.print("  no new pane uuid after window.create\n", .{});
+        return TestError.AssertionFailed;
+    }
     try waitForMockLog(h, seance(h, w2_uuid));
 
     // …closing THAT window (app keeps running) kills its terminals…
@@ -821,19 +828,25 @@ fn readFileBuf(path: []const u8, buf: []u8) ?[]const u8 {
     return buf[0..n];
 }
 
-/// Poll the mock-zmx log until it contains `needle`.
-fn waitForMockLog(h: *Harness, needle: []const u8) TestError!void {
+/// Poll any harness log file until it contains `needle`.
+fn waitForLogLine(h: *Harness, path: []const u8, needle: []const u8) TestError!void {
+    _ = h;
     var buf: [65536]u8 = undefined;
     var elapsed: u64 = 0;
     while (elapsed < 20_000) {
-        if (readFileBuf(h.mock_log, &buf)) |content| {
+        if (readFileBuf(path, &buf)) |content| {
             if (std.mem.indexOf(u8, content, needle) != null) return;
         }
         io.sleep(POLL_SLEEP_MS * std.time.ns_per_ms);
         elapsed += POLL_SLEEP_MS;
     }
-    std.debug.print("  mock log missing: {s}\n", .{needle});
+    std.debug.print("  log {s} missing: {s}\n", .{ path, needle });
     return TestError.Timeout;
+}
+
+/// Poll the mock-zmx log until it contains `needle`.
+fn waitForMockLog(h: *Harness, needle: []const u8) TestError!void {
+    return waitForLogLine(h, h.mock_log, needle);
 }
 
 /// Assert the mock-zmx log does NOT contain `needle` (poll a grace window
