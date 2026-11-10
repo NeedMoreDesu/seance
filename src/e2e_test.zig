@@ -509,6 +509,22 @@ fn testZmxLifecycle(h: *Harness) TestError!void {
     _ = try h.callOk("surface.close", close_surface);
     try waitForMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, u_split)}));
 
+    // 4b. Split again, then close via surface.close WITHOUT surface_id —
+    // the focused-pane path (keybind close_pane / palette "Close Pane").
+    // closeFocusedPane must capture the doomed pane's UUID BEFORE the pane
+    // is destroyed and kill exactly its session.
+    _ = try h.callOk("surface.split", null);
+    var snap2b: std.ArrayList([]const u8) = .empty;
+    try treePaneUuids(h, &snap2b);
+    const u_split2 = newUuids(snap2.items, snap2b.items);
+    if (u_split2.len == 0) {
+        std.debug.print("  no new pane uuid after second split\n", .{});
+        return TestError.AssertionFailed;
+    }
+    try waitForMockLog(h, seance(h, u_split2));
+    _ = try h.callOk("surface.close", null);
+    try waitForMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, u_split2)}));
+
     // 5. Explicit tab close → remaining terminal of the tab is killed.
     const close_ws = std.fmt.allocPrint(h.alloc, "{{\"workspace_id\":{d}}}", .{ws_id}) catch
         return TestError.Unexpected;
