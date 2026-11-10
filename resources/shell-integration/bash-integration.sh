@@ -20,6 +20,32 @@
 # environment at session creation — without the re-export the session's
 # bash boots bare (no rc files, no shell integration = degraded terminal).
 if [[ -n "${SEANCE_ZMX_ATTACH:-}" && -n "${SEANCE_PANE_UUID:-}" && -n "${GHOSTTY_RESOURCES_DIR:-}" && "${ZMX_SESSION:-}" != "seance-${SEANCE_PANE_UUID}" ]]; then
+    # The attach client's winsize at zmx INIT is what the daemon serializes
+    # the session snapshot at. Seance animates its restored layout for a
+    # while after shell startup (observed transients like 42x14 / 13x1 in
+    # the zmx daemon logs), so attaching immediately bakes a wrong width
+    # into the re-attached pane: the PTY self-heals via SIGWINCH a frame
+    # later, but the already-rendered snapshot never re-wraps — that's the
+    # "broken shapes / eaten prompt after quit->reopen" bug. Wait until the
+    # pane size stops changing before exec'ing the attach (3 consecutive
+    # equal reads ~20ms apart; hard cap ~800ms so a never-settling size
+    # still attaches at whatever it last reported).
+    if [[ -t 0 ]] && command -v stty >/dev/null 2>&1; then
+        _seance_prev="" _seance_same=0 _seance_i=0
+        while [ "$_seance_i" -lt 40 ]; do
+            _seance_cur=$(stty size 2>/dev/null) || break
+            if [ -n "$_seance_cur" ] && [ "$_seance_cur" = "$_seance_prev" ]; then
+                _seance_same=$((_seance_same + 1))
+                [ "$_seance_same" -ge 2 ] && break
+            else
+                _seance_same=0
+            fi
+            _seance_prev="$_seance_cur"
+            sleep 0.02 2>/dev/null || break
+            _seance_i=$((_seance_i + 1))
+        done
+        unset _seance_prev _seance_same _seance_i _seance_cur
+    fi
     exec env -u ZMX_SESSION \
         ENV="${GHOSTTY_RESOURCES_DIR}/shell-integration/bash/ghostty.bash" \
         GHOSTTY_BASH_INJECT=1 \
