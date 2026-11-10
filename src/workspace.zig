@@ -2225,8 +2225,21 @@ pub const Workspace = struct {
 
     pub fn closeTabInFocusedGroup(self: *Workspace) bool {
         const grp = self.focusedGroup() orelse return true;
-        if (grp.focusedTerminalPane()) |pane| self.clearPaneHistoryFor(pane.id);
+        // Capture the doomed pane's zmx session UUID before removal:
+        // removeActivePanel destroys the panel via a programmatic close-page
+        // (cleanup handlers suppressed), so nothing else kills the session.
+        var doomed_uuid: ?[uuid.len]u8 = null;
+        if (grp.focusedTerminalPane()) |pane| {
+            self.clearPaneHistoryFor(pane.id);
+            doomed_uuid = pane.pane_uuid;
+        }
         const empty = grp.removeActivePanel();
+        if (doomed_uuid) |u| {
+            if (u[0] != 0) {
+                const Window = @import("window.zig");
+                Window.WindowState.killZmxSessions(u[0..]);
+            }
+        }
         if (empty) {
             return self.closeEmptyGroup(grp.id);
         }

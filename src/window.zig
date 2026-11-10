@@ -485,15 +485,28 @@ pub const WindowState = struct {
 
     pub fn closeFocusedPane(self: *WindowState) void {
         const ws = self.activeWorkspace() orelse return;
-        // Capture the focused pane's ID before it is destroyed
-        const pane_id: ?u64 = if (ws.focusedGroup()) |fg|
-            if (fg.getActivePanel()) |p| p.getId() else null
-        else
-            null;
+        // Capture the focused pane's ID and its zmx session UUID before it
+        // is destroyed. The cascade below (closeWorkspace) collects the tab's
+        // pane UUIDs only AFTER ws.closeFocusedPane() has already removed this
+        // pane, so without this capture the closed terminal's session leaks.
+        const fg = ws.focusedGroup();
+        const active_panel = if (fg) |g| g.getActivePanel() else null;
+        const pane_id: ?u64 = if (active_panel) |p| p.getId() else null;
+        var closed_uuid: ?[36]u8 = null;
+        if (active_panel) |p| {
+            if (p.asTerminal()) |tp| closed_uuid = tp.pane_uuid;
+        }
         const ws_empty = ws.closeFocusedPane();
         // Purge notifications for the closed pane
         if (pane_id) |pid| {
             _ = self.notif_center.store.removeForPane(pid);
+        }
+        // Explicit terminal close (keybind close_pane, socket surface.close
+        // without surface_id, palette "Close Pane"): kill its session.
+        // zmx kill --force is idempotent, so overlap with a cascade kill
+        // below is harmless.
+        if (closed_uuid) |u| {
+            if (u[0] != 0) killZmxSessions(u[0..]);
         }
         if (ws_empty) {
             self.closeWorkspace(self.active_workspace);

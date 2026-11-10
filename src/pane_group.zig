@@ -479,6 +479,7 @@ pub const PaneGroup = struct {
             while (i > 0) {
                 i -= 1;
                 if (i != keep_index) {
+                    killZmxForPanel(self.panels.items[i]);
                     _ = self.removePanel(i);
                 }
             }
@@ -496,6 +497,7 @@ pub const PaneGroup = struct {
             var i = self.panels.items.len;
             while (i > from_index + 1) {
                 i -= 1;
+                killZmxForPanel(self.panels.items[i]);
                 _ = self.removePanel(i);
             }
         } else {
@@ -582,6 +584,18 @@ fn panelTitle(panel: Panel) []const u8 {
 
 // ── AdwTabView signal handlers ─────────────────────────────────────
 
+/// Kill the zmx session owned by a terminal panel that is being removed by
+/// an explicit close which does NOT route through WindowState.closePaneById /
+/// closeWorkspace (stacked-mode removal loops, user-initiated page detach).
+/// killZmxSessions copies the UUID synchronously, so this is safe to call
+/// while the panel is still alive, just before it is destroyed.
+fn killZmxForPanel(panel: Panel) void {
+    const pane = panel.asTerminal() orelse return;
+    if (pane.pane_uuid[0] == 0) return;
+    const Window = @import("window.zig");
+    Window.WindowState.killZmxSessions(pane.pane_uuid[0..]);
+}
+
 fn onClosePage(_: *c.AdwTabView, page: *c.AdwTabPage, user_data: c.gpointer) callconv(.c) c.gboolean {
     const self: *PaneGroup = @ptrCast(@alignCast(user_data));
     c.adw_tab_view_close_page_finish(self.tab_view, page, 1);
@@ -615,6 +629,8 @@ fn onPageDetached(tab_view: *c.AdwTabView, page: *c.AdwTabPage, _: c.gint, user_
     // User-initiated close (clicked tab close button): clean up the panel
     if (self.findPanelIndexByWidget(child)) |idx| {
         const panel = self.panels.items[idx];
+        // Explicit terminal close: kill its zmx session before teardown.
+        killZmxForPanel(panel);
         _ = self.panels.orderedRemove(idx);
         panel.destroy(self.alloc);
         if (self.active_panel >= self.panels.items.len and self.panels.items.len > 0) {
