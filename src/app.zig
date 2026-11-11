@@ -5,6 +5,7 @@ const c = @import("c.zig").c;
 const Window = @import("window.zig");
 const keybinds = @import("keybinds.zig");
 const session = @import("session.zig");
+const close_history = @import("close_history.zig");
 const WindowManager = @import("window_manager.zig").WindowManager;
 const socket_server = @import("socket_server.zig");
 const ghostty_bridge = @import("ghostty_bridge.zig");
@@ -93,6 +94,10 @@ fn onActivate(app: *c.AdwApplication) callconv(.c) void {
         if (!session.loadAndRestoreAll(manager)) {
             _ = manager.newWindow();
         }
+        // Close history: load it, prune entries whose zmx sessions died
+        // since the last run, and start the periodic `zmx list` scan that
+        // keeps the sidebar's unattached count (and the sweep) fresh.
+        close_history.start();
         // Register UNIX signal handlers for graceful shutdown
         _ = c.g_unix_signal_add(@intFromEnum(std.posix.SIG.TERM), &onUnixSignal, @ptrCast(@alignCast(app)));
         _ = c.g_unix_signal_add(@intFromEnum(std.posix.SIG.INT), &onUnixSignal, @ptrCast(@alignCast(app)));

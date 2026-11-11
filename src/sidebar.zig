@@ -44,6 +44,11 @@ pub const Sidebar = struct {
     // adw_header_bar.  Null in CSD mode or when the button bar is disabled.
     footer: ?*c.GtkWidget = null,
 
+    // "unattached zmx session: N" line, docked at the bottom of the
+    // sidebar directly above the footer row (or the sidebar's bottom edge
+    // in CSD). Visible only while zmx-attach is on and sessions detach.
+    zmx_row: ?*c.GtkWidget = null,
+
     // Suppress refresh while interacting (context menu or hover)
     popover_open: bool = false,
     hover_active: bool = false,
@@ -91,6 +96,14 @@ pub const Sidebar = struct {
         c.gtk_widget_set_vexpand(tab_bar.widget, 1);
         c.gtk_box_append(@ptrCast(vbox), tab_bar.widget);
 
+        // Unattached-zmx indicator: sits at the bottom (the tab bar above
+        // it expands), i.e. directly above the footer built later.
+        const zmx_label = c.gtk_label_new("");
+        c.gtk_widget_add_css_class(zmx_label, "dim-label");
+        c.gtk_label_set_xalign(@ptrCast(zmx_label), 0.0);
+        c.gtk_widget_set_visible(zmx_label, 0);
+        c.gtk_box_append(@ptrCast(vbox), zmx_label);
+
         // The footer row (add / notif / hide / settings) is built lazily by
         // buildFooter() once the Sidebar has its final stable address in
         // WindowState.  In CSD mode the window's adw_header_bar hosts these
@@ -102,6 +115,7 @@ pub const Sidebar = struct {
             .alloc = alloc,
             .on_select = on_select,
             .on_new = on_new,
+            .zmx_row = zmx_label,
         };
     }
 
@@ -183,6 +197,20 @@ pub const Sidebar = struct {
         self.footer = null;
         self.notif_badge = null;
         self.notif_overlay = null;
+    }
+
+    /// Show "unattached zmx session: N" above the footer, or hide the row
+    /// when N is 0 (kept in sync by the close-history scan).
+    pub fn setZmxUnattached(self: *Sidebar, count: usize) void {
+        const row = self.zmx_row orelse return;
+        if (count == 0) {
+            c.gtk_widget_set_visible(row, 0);
+            return;
+        }
+        var buf: [64:0]u8 = [_:0]u8{0} ** 64;
+        const text = std.fmt.bufPrintZ(&buf, "unattached zmx session: {d}", .{count}) catch return;
+        c.gtk_label_set_text(@ptrCast(row), text);
+        c.gtk_widget_set_visible(row, 1);
     }
 
     /// Build display order: pinned workspaces first, then unpinned, preserving

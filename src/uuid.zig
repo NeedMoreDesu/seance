@@ -40,6 +40,23 @@ pub fn claim(id: *const [len]u8) bool {
     return true;
 }
 
+/// Force-adopt an id whose previous owner is gone (undo-close revive):
+/// drop any earlier registry entry for it, then record it as taken. The
+/// closed terminal's UUID must survive so its shell re-attaches to the
+/// SAME zmx session it was born in — minting a fresh id would orphan it.
+pub fn force(id: *const [len]u8) void {
+    var i: usize = 0;
+    while (i < n_tracked) : (i += 1) {
+        if (std.mem.eql(u8, &tracked[i], id)) {
+            var j = i;
+            while (j + 1 < n_tracked) : (j += 1) tracked[j] = tracked[j + 1];
+            n_tracked -= 1;
+            break;
+        }
+    }
+    record(id);
+}
+
 /// Mint an RFC-4122 version-4 UUID (36 lowercase hex chars with dashes)
 /// that is not already in the registry. Records it as issued.
 pub fn generate(buf: *[len]u8) void {
@@ -109,4 +126,25 @@ test "claim: rejects duplicate ids, accepts fresh ones" {
     @memcpy(&copy, fresh[0..len]);
     try testing.expect(claim(&copy));
     try testing.expect(!claim(&copy));
+}
+
+test "force: re-adopts a seen id exactly once" {
+    var id: [len]u8 = undefined;
+    generate(&id);
+    // id is in the registry from generate; force removes the old record
+    // and re-adds it — still exactly one copy.
+    force(&id);
+    try testing.expect(isSeen(&id));
+    force(&id);
+    try testing.expect(isSeen(&id));
+    // A brand-new id is simply recorded.
+    const fresh = "1234abcd-12ab-469f-a165-70867728950f";
+    var copy: [len]u8 = undefined;
+    @memcpy(&copy, fresh[0..len]);
+    force(&copy);
+    try testing.expect(isSeen(&copy));
+    // Registry consistency: n_tracked never double-counts.
+    const before = n_tracked;
+    force(&copy);
+    try testing.expectEqual(before, n_tracked);
 }

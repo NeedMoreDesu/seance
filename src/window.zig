@@ -9,6 +9,7 @@ const Sidebar = sidebar_mod.Sidebar;
 const vtab_mod = @import("vertical_tab_bar.zig");
 const ContextAction = sidebar_mod.ContextAction;
 const Panel = @import("panel.zig").Panel;
+const PaneGroup = @import("pane_group.zig").PaneGroup;
 const git_info = @import("git_info.zig");
 const notification = @import("notification.zig");
 const notification_panel = @import("notification_panel.zig");
@@ -20,6 +21,8 @@ const blur = @import("blur.zig");
 const kde_decoration = @import("kde_decoration.zig");
 const port_scan = @import("port_scan.zig");
 const session_mod = @import("session.zig");
+const close_history = @import("close_history.zig");
+const uuid = @import("uuid.zig");
 
 /// Window decoration currently in effect for a single window.  Derived from
 /// config.decoration_mode plus environment (is_gnome) plus platform
@@ -101,6 +104,10 @@ pub const WindowState = struct {
     port_scan_in_flight: bool = false,
     destroyed: bool = false,
     next_port_ordinal: u32 = 0,
+    /// Process-unique window id, recorded in close-history entries so an
+    /// undo can re-attach a tab/pane to the window it was closed in
+    /// (falls back to the active window when that one is gone).
+    id: u64 = 0,
 
     // Chrome state, tracked so applyDecorationMode can rebuild at runtime.
     // banner_box is the stable content subtree (banner + toast + overlay + hbox)
@@ -263,40 +270,29 @@ pub const WindowState = struct {
         if (ok == 0) std.log.warn("spawn: failed to spawn {s} command", .{label});
     }
 
-    /// Which close policy governs a killZmxSessions call.
-    pub const KillCtx = enum {
-        /// terminal/pane/tab close — [behavior] zmx-kill-on-terminal-close
-        terminal,
-        /// window close — [behavior] zmx-kill-on-window-close
-        window,
-    };
+    /// Set for the duration of a zmx kill-close cascade (zmx_close_pane /
+    /// zmx_close_tab / zmx_close_window, or a socket close with
+    /// zmx_kill=true): the close paths in scope then DESTROY the sessions
+    /// they close, instead of the default keep + record-history.
+    var zmx_kill_mode = false;
 
-    /// While set, killZmxSessions uses the OPPOSITE of the configured
-    /// policy for its ctx. Used by the zmx mirror keybinds
-    /// (zmx_close_tab / zmx_close_window): those actions perform the same
-    /// close as their plain counterparts but with the session-kill meaning
-    /// flipped, for the duration of the synchronous close cascade.
-    var zmx_kill_invert = false;
-
-    pub fn setZmxKillInvert(on: bool) void {
-        zmx_kill_invert = on;
+    pub fn setZmxKillMode(on: bool) void {
+        zmx_kill_mode = on;
     }
 
-    /// Built-in zmx cleanup: kill the zmx sessions of the given terminals
-    /// (space-separated UUID list; corrupt tokens are dropped) if the
-    /// policy for `ctx` says so — master switch [behavior] zmx-attach,
-    /// then the per-target kill flag (inverted while zmx_kill_invert is
-    /// set). Whole-app quit never routes through here: sessions survive a
-    /// quit so the next seance launch re-attaches to them.
-    pub fn killZmxSessions(uuids: []const u8, ctx: KillCtx) void {
+    pub fn zmxKillMode() bool {
+        return zmx_kill_mode;
+    }
+
+    /// Destroy the zmx sessions of the given terminals (space-separated
+    /// UUID list; corrupt tokens dropped). Reached ONLY from explicit kill
+    /// paths: kill-close keybinds/params and the kill-unattached sweep.
+    /// Plain closes never call this; a whole-app quit kills nothing so the
+    /// next seance launch re-attaches to the surviving sessions.
+    pub fn killZmxSessions(uuids: []const u8) void {
         const zmx_mod = @import("zmx.zig");
         const cfg = config_mod.get();
         if (!cfg.zmx_attach) return;
-        const policy = switch (ctx) {
-            .terminal => cfg.zmx_kill_on_terminal_close,
-            .window => cfg.zmx_kill_on_window_close,
-        };
-        if (!(if (zmx_kill_invert) !policy else policy)) return;
         if (uuids.len == 0) return;
 
         var norm_buf: [16384]u8 = undefined;
@@ -311,10 +307,8 @@ pub const WindowState = struct {
         spawnBash("zmx-kill", zmx_mod.kill_cmd_env, &envs);
     }
 
-    /// Kill every terminal session belonging to a window that is being
-    /// closed (called by WindowManager.closeWindow; policy-gated).
-    pub fn killZmxSessionsOfWindow(win: *WindowState) void {
-        var buf: [16384]u8 = undefined;
+    /// Space-separated UUIDs of every terminal session in a window.
+    pub fn collectZmxUuidsOfWindow(win: *WindowState, buf: []u8) []const u8 {
         var pos: usize = 0;
         for (win.workspaces.items) |ws| {
             const s = ws.collectPaneUuids(buf[pos..]);
@@ -324,41 +318,224 @@ pub const WindowState = struct {
                 pos += 1;
             }
         }
-        killZmxSessions(buf[0..pos], .window);
+        return buf[0..pos];
     }
 
-    /// Mirror of ctrl+shift-w (close tab in focused group + cascade) with
-    /// the zmx session-kill meaning flipped for this operation.
-    pub fn zmxCloseTabFocused(self: *WindowState) void {
-        setZmxKillInvert(true);
-        defer setZmxKillInvert(false);
-        if (self.activeWorkspace()) |ws| {
-            const ws_empty = ws.closeTabInFocusedGroup();
-            if (ws_empty) self.closeWorkspace(self.active_workspace);
+    pub fn killZmxSessionsOfWindow(win: *WindowState) void {
+        var buf: [16384]u8 = undefined;
+        killZmxSessions(collectZmxUuidsOfWindow(win, &buf));
+    }
+
+    /// The single close chokepoint every explicit close path funnels
+    /// through once the doomed item is captured but before it is gone:
+    /// kill mode destroys the sessions; the default keeps them alive and
+    /// records the revive snapshot in the close history (only closes that
+    /// can actually revive zmx get recorded — record() self-checks).
+    /// Either way the unattached count needs a refresh scan.
+    pub fn zmxTargetClosed(
+        self: *WindowState,
+        kind: close_history.Kind,
+        tab_uuid: ?[uuid.len]u8,
+        index: usize,
+        col_width: f64,
+        col_tabbed: bool,
+        uuids: []const u8,
+        snapshot: ?[]const u8,
+    ) void {
+        const cfg = config_mod.get();
+        if (!cfg.zmx_attach) return;
+        if (zmx_kill_mode) {
+            killZmxSessions(uuids);
+        } else if (snapshot) |snap| {
+            close_history.record(.{
+                .kind = kind,
+                .window_id = self.id,
+                .tab_uuid = tab_uuid,
+                .index = index,
+                .col_width = col_width,
+                .col_tabbed = col_tabbed,
+                .sessions = uuids,
+                .json = snap,
+            });
+        }
+        close_history.triggerScan();
+    }
+
+    /// Column context recorded with a doomed terminal (index/width/mode)
+    /// so undo can put the split back where it was.
+    const PaneCtx = struct {
+        col_index: usize = 0,
+        col_width: f64 = 0,
+        col_tabbed: bool = false,
+
+        fn forGroup(ws: *Workspace, grp: ?*PaneGroup) PaneCtx {
+            const g = grp orelse return .{};
+            var ctx: PaneCtx = .{};
+            var live: usize = 0;
+            for (ws.columns.items) |*col| {
+                if (col.closing) continue;
+                var hit = false;
+                for (col.groups.items) |cg| {
+                    if (cg.id == g.id) hit = true;
+                }
+                if (hit) {
+                    ctx.col_index = live;
+                    ctx.col_width = col.target_width;
+                    ctx.col_tabbed = col.layout_mode == .tabbed;
+                    return ctx;
+                }
+                live += 1;
+            }
+            return ctx;
+        }
+    };
+
+    /// Whole-workspace capture taken BEFORE a pane close that is about to
+    /// cascade into the tab's death, so one undo restores the tab exactly
+    /// as it was — doomed pane included. Must live in ONE stack variable
+    /// (uuids slices into its own buffer; never copy the struct).
+    const WsPre = struct {
+        tab: [uuid.len]u8 = [_]u8{0} ** uuid.len,
+        has_tab: bool = false,
+        uuids_buf: [4096]u8 = undefined,
+        uuids: []const u8 = "",
+        json: ?[]u8 = null,
+
+        fn capture(self: *WsPre, alloc: std.mem.Allocator, ws: *Workspace) void {
+            self.tab = ws.tab_uuid;
+            self.has_tab = true;
+            self.uuids = ws.collectPaneUuids(&self.uuids_buf);
+            self.json = session_mod.captureWorkspaceJson(alloc, ws);
+        }
+
+        fn deinit(self: *WsPre, alloc: std.mem.Allocator) void {
+            if (self.json) |j| alloc.free(j);
+            self.json = null;
+        }
+    };
+
+    /// Close one tab (stacked panel / column / whole workspace cascade)
+    /// in the focused group — the plain close: zmx sessions survive and
+    /// the doomed item lands in the close history.
+    pub fn closeTabFocused(self: *WindowState) void {
+        const ws = self.activeWorkspace() orelse return;
+        const cfg = config_mod.get();
+        const keep = cfg.zmx_attach and !zmx_kill_mode;
+
+        const grp = ws.focusedGroup();
+        var doomed_uuid: ?[uuid.len]u8 = null;
+        var panel_json: ?[]u8 = null;
+        var ctx: PaneCtx = .{};
+        if (grp) |g| {
+            if (g.getActivePanel()) |p| {
+                if (p.asTerminal()) |tp| doomed_uuid = tp.pane_uuid;
+            }
+        }
+        const will_empty_ws = keep and ws.willEmptyAfterPaneClose();
+        if (keep and !will_empty_ws) {
+            ctx = PaneCtx.forGroup(ws, grp);
+            if (grp) |g| {
+                if (g.getActivePanel()) |p| {
+                    const doomed = [1]Panel{p};
+                    panel_json = session_mod.captureColumnSnapshot(self.alloc, ctx.col_width, ctx.col_tabbed, &doomed);
+                }
+            }
+        }
+        var pre_buf: WsPre = .{};
+        var have_pre = false;
+        if (will_empty_ws) {
+            pre_buf.capture(self.alloc, ws);
+            have_pre = true;
+        }
+
+        const ws_empty = ws.closeTabInFocusedGroup();
+
+        if (ws_empty) {
+            if (have_pre) {
+                defer pre_buf.deinit(self.alloc);
+                self.closeWorkspaceCap(self.active_workspace, &pre_buf);
+            } else {
+                self.closeWorkspace(self.active_workspace);
+            }
+        } else if (doomed_uuid) |u| {
+            defer if (panel_json) |j| self.alloc.free(j);
+            if (u[0] != 0) {
+                self.zmxTargetClosed(.pane, ws.tab_uuid, ctx.col_index, ctx.col_width, ctx.col_tabbed, u[0..], panel_json);
+            }
         }
     }
 
-    /// Mirror of the window close button / Alt+F4 with the zmx
-    /// session-kill meaning flipped. Bypasses the close confirmation
-    /// (the key itself is the explicit intent). The pre-emptive kill makes
-    /// the LAST-window case (whole-app quit, which otherwise never kills)
-    /// flip to "kill" too.
+    /// ctrl+shift-w's kill twin: same close, sessions destroyed instead
+    /// of kept+recorded.
+    pub fn zmxCloseTabFocused(self: *WindowState) void {
+        zmx_kill_mode = true;
+        defer zmx_kill_mode = false;
+        self.closeTabFocused();
+    }
+
+    /// Kill twin of close_pane (ctrl+shift-x).
+    pub fn zmxClosePaneFocused(self: *WindowState) void {
+        zmx_kill_mode = true;
+        defer zmx_kill_mode = false;
+        self.closeFocusedPane();
+    }
+
+    /// Kill twin of the window close button / Alt+F4. Bypasses the close
+    /// confirmation (the key itself is the explicit intent). The
+    /// pre-emptive kill covers the LAST-window case too: that path quits
+    /// before closeWindow reaches its per-window handling, and quitting
+    /// never kills — here the intent is a hard quit.
     pub fn zmxCloseWindow(self: *WindowState) void {
-        setZmxKillInvert(true);
-        defer setZmxKillInvert(false);
+        zmx_kill_mode = true;
+        defer zmx_kill_mode = false;
         killZmxSessionsOfWindow(self);
         self.window_manager.closeWindow(self);
     }
 
+    /// "Undo Tab Close (zmx)": revive the most recently closed item
+    /// (pane, tab or window) from the close history, in reverse order of
+    /// closing. Its shells re-attach to the still-alive zmx sessions.
+    pub fn zmxUndoClose(_: *WindowState) void {
+        if (!config_mod.get().zmx_attach) return;
+        _ = close_history.undoLast();
+    }
+
+    /// "Kill Unattached zmx Sessions": sweep every detached (clients=0)
+    /// session whose name starts with the seance- prefix. Foreign zmx
+    /// sessions are never touched.
+    pub fn zmxKillUnattached(_: *WindowState) void {
+        if (!config_mod.get().zmx_attach) return;
+        close_history.killUnattached();
+    }
+
     pub fn closeWorkspace(self: *WindowState, index: usize) void {
+        self.closeWorkspaceCap(index, null);
+    }
+
+    /// `pre` (set by the pane-close dispatchers when the doomed pane
+    /// takes the whole workspace with it) supplies the snapshot + UUID
+    /// list captured BEFORE that pane was removed, so the close-history
+    /// tab entry still contains it and ONE undo restores the full tab.
+    pub fn closeWorkspaceCap(self: *WindowState, index: usize, pre: ?*WsPre) void {
         if (index >= self.workspaces.items.len) return;
         const ws = self.workspaces.items[index];
 
-        // Collect pane UUIDs space-separated; nul-terminate IN PLACE (a
-        // bufPrintZ from pu_buf into itself would alias and panic).
-        var pu_buf: [4096:0]u8 = undefined;
-        const pu = ws.collectPaneUuids(pu_buf[0 .. pu_buf.len - 1]);
-        pu_buf[pu.len] = 0;
+        const cfg = config_mod.get();
+        const keep = cfg.zmx_attach and !zmx_kill_mode;
+        const tab_id = ws.tab_uuid;
+
+        // Collect pane UUIDs space-separated before teardown (the doomed
+        // sessions to kill, or the live ids to record).
+        var pu_buf: [4096]u8 = undefined;
+        var uuids: []const u8 = "";
+        var ws_json: ?[]u8 = null;
+        if (pre) |p| {
+            uuids = p.uuids;
+            ws_json = p.json;
+        } else {
+            uuids = ws.collectPaneUuids(&pu_buf);
+            if (keep) ws_json = session_mod.captureWorkspaceJson(self.alloc, ws);
+        }
 
         // Clear workspace history if it points to the closing workspace
         if (self.last_workspace_id) |lid| {
@@ -397,8 +574,15 @@ pub const WindowState = struct {
             self.sidebar.setActive(self.active_workspace);
         }
 
-        // Explicit tab close: kill every terminal session this tab owned.
-        killZmxSessions(pu, .terminal);
+        // Explicit tab close: default keeps every terminal session this
+        // tab owned alive and records the snapshot; kill mode kills them.
+        self.zmxTargetClosed(.tab, tab_id, index, 0, false, uuids, ws_json);
+
+        // json from the pre-capture was already handed off (record()
+        // duplicates it); free the owned buffer for internal captures.
+        if (pre == null) {
+            if (ws_json) |j| self.alloc.free(j);
+        }
     }
 
     /// Detach a workspace from this window without destroying it.
@@ -486,32 +670,61 @@ pub const WindowState = struct {
 
     pub fn closeFocusedPane(self: *WindowState) void {
         const ws = self.activeWorkspace() orelse return;
-        // Capture the focused pane's ID and its zmx session UUID before it
-        // is destroyed. The cascade below (closeWorkspace) collects the tab's
-        // pane UUIDs only AFTER ws.closeFocusedPane() has already removed this
-        // pane, so without this capture the closed terminal's session leaks.
+        const cfg = config_mod.get();
+        const keep = cfg.zmx_attach and !zmx_kill_mode;
+
+        // Capture the focused pane's ID, its zmx session UUID and (when
+        // the close is about to keep it alive) its revive snapshot — all
+        // BEFORE it is destroyed. The cascade below (closeWorkspaceCap)
+        // collects the tab's pane UUIDs only AFTER ws.closeFocusedPane()
+        // has already removed this pane, so without the pre-captures the
+        // closed terminal would leak (kill path) or be missing from the
+        // undo snapshot (keep path).
         const fg = ws.focusedGroup();
         const active_panel = if (fg) |g| g.getActivePanel() else null;
         const pane_id: ?u64 = if (active_panel) |p| p.getId() else null;
-        var closed_uuid: ?[36]u8 = null;
+        var closed_uuid: ?[uuid.len]u8 = null;
         if (active_panel) |p| {
             if (p.asTerminal()) |tp| closed_uuid = tp.pane_uuid;
         }
+
+        const will_empty_ws = cfg.zmx_attach and ws.willEmptyAfterPaneClose();
+        var panel_json: ?[]u8 = null;
+        var ctx: PaneCtx = .{};
+        if (keep and !will_empty_ws) {
+            if (active_panel) |p| {
+                ctx = PaneCtx.forGroup(ws, fg);
+                const doomed = [1]Panel{p};
+                panel_json = session_mod.captureColumnSnapshot(self.alloc, ctx.col_width, ctx.col_tabbed, &doomed);
+            }
+        }
+        var pre_buf: WsPre = .{};
+        var have_pre = false;
+        if (will_empty_ws and !zmx_kill_mode) {
+            pre_buf.capture(self.alloc, ws);
+            have_pre = true;
+        }
+
         const ws_empty = ws.closeFocusedPane();
         // Purge notifications for the closed pane
         if (pane_id) |pid| {
             _ = self.notif_center.store.removeForPane(pid);
         }
-        // Explicit terminal close (keybind close_pane, socket surface.close
-        // without surface_id, palette "Close Pane"): kill its session.
-        // zmx kill --force is idempotent, so overlap with a cascade kill
-        // below is harmless.
-        if (closed_uuid) |u| {
-            if (u[0] != 0) killZmxSessions(u[0..], .terminal);
-        }
+
         if (ws_empty) {
-            self.closeWorkspace(self.active_workspace);
+            if (have_pre) {
+                defer pre_buf.deinit(self.alloc);
+                self.closeWorkspaceCap(self.active_workspace, &pre_buf);
+            } else {
+                self.closeWorkspace(self.active_workspace);
+            }
         } else {
+            if (closed_uuid) |u| {
+                defer if (panel_json) |j| self.alloc.free(j);
+                if (u[0] != 0) {
+                    self.zmxTargetClosed(.pane, ws.tab_uuid, ctx.col_index, ctx.col_width, ctx.col_tabbed, u[0..], panel_json);
+                }
+            }
             self.sidebar.refresh();
         }
     }
@@ -541,20 +754,46 @@ pub const WindowState = struct {
         for (self.workspaces.items, 0..) |ws, ws_idx| {
             const grp = ws.findGroupContainingPane(pane_id) orelse continue;
 
-            ws.clearPaneHistoryFor(pane_id);
+            const cfg = config_mod.get();
+            const keep = cfg.zmx_attach and !zmx_kill_mode;
 
-            // Explicit terminal close: kill its zmx session. This covers
+            // Capture the doomed terminal's UUID (+ revive snapshot and
+            // column context) before anything is destroyed. This covers
             // closes that never cascade into closeWorkspace (a split or a
             // stacked panel closed inside a still-live tab); when the last
-            // pane goes, the cascade below kills only the remaining ones
-            // and zmx kill --force makes any overlap harmless.
+            // pane goes the cascade below takes the merged snapshot, and
+            // zmx kill --force keeps any overlap harmless.
+            var doomed_uuid: ?[uuid.len]u8 = null;
+            var doomed_panel: ?Panel = null;
             for (grp.panels.items) |panel| {
                 const tp = panel.asTerminal() orelse continue;
                 if (tp.id == pane_id) {
-                    killZmxSessions(tp.pane_uuid[0..], .terminal);
+                    doomed_uuid = tp.pane_uuid;
+                    doomed_panel = panel;
                     break;
                 }
             }
+
+            const will_empty_ws = cfg.zmx_attach and
+                grp.panels.items.len == 1 and ws.liveColumnCount() == 1;
+
+            var panel_json: ?[]u8 = null;
+            var ctx: PaneCtx = .{};
+            if (keep and !will_empty_ws) {
+                if (doomed_panel) |p| {
+                    ctx = PaneCtx.forGroup(ws, grp);
+                    const doomed = [1]Panel{p};
+                    panel_json = session_mod.captureColumnSnapshot(self.alloc, ctx.col_width, ctx.col_tabbed, &doomed);
+                }
+            }
+            var pre_buf: WsPre = .{};
+            var have_pre = false;
+            if (will_empty_ws and !zmx_kill_mode) {
+                pre_buf.capture(self.alloc, ws);
+                have_pre = true;
+            }
+
+            ws.clearPaneHistoryFor(pane_id);
 
             // Group has multiple panels — remove just this one
             if (grp.panels.items.len > 1) {
@@ -565,14 +804,31 @@ pub const WindowState = struct {
                     }
                 }
                 ws.applyLayout();
+                if (doomed_uuid) |u| {
+                    defer if (panel_json) |j| self.alloc.free(j);
+                    if (u[0] != 0) {
+                        self.zmxTargetClosed(.pane, ws.tab_uuid, ctx.col_index, ctx.col_width, ctx.col_tabbed, u[0..], panel_json);
+                    }
+                }
                 return;
             }
 
             // Single panel: remove the entire column
             const ws_empty = ws.removeColumnByGroupId(grp.id);
             if (ws_empty) {
-                self.closeWorkspace(ws_idx);
+                if (have_pre) {
+                    defer pre_buf.deinit(self.alloc);
+                    self.closeWorkspaceCap(ws_idx, &pre_buf);
+                } else {
+                    self.closeWorkspace(ws_idx);
+                }
             } else {
+                if (doomed_uuid) |u| {
+                    defer if (panel_json) |j| self.alloc.free(j);
+                    if (u[0] != 0) {
+                        self.zmxTargetClosed(.pane, ws.tab_uuid, ctx.col_index, ctx.col_width, ctx.col_tabbed, u[0..], panel_json);
+                    }
+                }
                 self.sidebar.refresh();
             }
             return;
@@ -1538,6 +1794,9 @@ fn onFolderChosen(dialog: *c.GtkDialog, response_id: c_int, data: c.gpointer) ca
 // Global window manager pointer (replaces old window_state)
 pub var window_manager: ?*WindowManager = null;
 
+/// Monotonic process-global window id source for WindowState.id.
+var next_window_id: u64 = 0;
+
 pub fn create(wm: *WindowManager) !*WindowState {
     const alloc = wm.allocator;
     const config = config_mod.load();
@@ -1556,6 +1815,7 @@ pub fn create(wm: *WindowManager) !*WindowState {
 
     // Initialize state
     const state = try alloc.create(WindowState);
+    next_window_id += 1;
     state.* = .{
         .workspaces = .empty,
         .content_stack = @ptrCast(content_stack),
@@ -1565,6 +1825,7 @@ pub fn create(wm: *WindowManager) !*WindowState {
         .sidebar = undefined,
         .window_manager = wm,
         .gtk_window = @ptrCast(window),
+        .id = next_window_id,
     };
 
     // Detect GNOME once and cache on state; the env var is stable for the

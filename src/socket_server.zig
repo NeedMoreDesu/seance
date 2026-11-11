@@ -258,6 +258,11 @@ pub const SocketServer = struct {
         if (eql(method, "surface.split")) return handleSurfaceSplit(params, id, buf);
         if (eql(method, "surface.close")) return handleSurfaceClose(params, id, buf);
         if (eql(method, "surface.send_text")) return handleSurfaceSendText(params, id, buf);
+
+        // zmx methods
+        if (eql(method, "zmx.undo_close")) return handleZmxUndoClose(id, buf);
+        if (eql(method, "zmx.kill_unattached")) return handleZmxKillUnattached(id, buf);
+        if (eql(method, "zmx.status")) return handleZmxStatus(id, buf);
         if (eql(method, "surface.send_key")) return handleSurfaceSendKey(params, id, buf);
         if (eql(method, "surface.trigger_flash")) return handleSurfaceTriggerFlash(params, id, buf);
         if (eql(method, "surface.health")) return handleSurfaceHealth(params, id, buf);
@@ -511,6 +516,7 @@ pub const SocketServer = struct {
             "\"surface.send_text\",\"surface.send_key\",\"surface.trigger_flash\",\"surface.health\"," ++
             "\"surface.read_screen\",\"surface.expel\",\"surface.resize_row\",\"surface.reorder\"," ++
             "\"notification.create\",\"notification.list\",\"notification.clear\"," ++
+            "\"zmx.undo_close\",\"zmx.kill_unattached\",\"zmx.status\"," ++
             "\"surface.report_cwd\",\"surface.report_git\",\"surface.clear_git\",\"surface.report_state\"]";
         var result_buf: [1024]u8 = undefined;
         const result = std.fmt.bufPrint(&result_buf, "{{\"methods\":{s}}}", .{methods}) catch
@@ -709,15 +715,21 @@ pub const SocketServer = struct {
     }
 
     fn handleWindowClose(params: ?std.json.Value, id: []const u8, buf: []u8) []const u8 {
+        const Window = @import("window.zig");
         const wm = getWindowManager() orelse return writeJsonError(buf, id, "not_ready", "Window manager not initialized");
+        const kill = getParamBool(params, "zmx_kill") orelse false;
         const win_idx = getParamInt(params, "window_id") orelse {
             // Close active window
             const state = wm.active_window orelse return writeJsonError(buf, id, "no_window", "No active window");
+            if (kill) Window.WindowState.setZmxKillMode(true);
+            defer if (kill) Window.WindowState.setZmxKillMode(false);
             c.gtk_window_close(@ptrCast(state.gtk_window));
             return writeJsonOk(buf, id, "{}");
         };
         if (win_idx >= wm.windows.items.len) return writeJsonError(buf, id, "not_found", "Window not found");
         const state = wm.windows.items[win_idx];
+        if (kill) Window.WindowState.setZmxKillMode(true);
+        defer if (kill) Window.WindowState.setZmxKillMode(false);
         c.gtk_window_close(@ptrCast(state.gtk_window));
         return writeJsonOk(buf, id, "{}");
     }
@@ -849,11 +861,15 @@ pub const SocketServer = struct {
     }
 
     fn handleWorkspaceClose(params: ?std.json.Value, id: []const u8, buf: []u8) []const u8 {
+        const Window = @import("window.zig");
+        const kill = getParamBool(params, "zmx_kill") orelse false;
         const state = getActiveState() orelse return writeJsonError(buf, id, "not_ready", "No active window");
 
         if (getParamInt(params, "workspace_id")) |ws_id| {
             for (state.workspaces.items, 0..) |ws, i| {
                 if (ws.id == ws_id) {
+                    if (kill) Window.WindowState.setZmxKillMode(true);
+                    defer if (kill) Window.WindowState.setZmxKillMode(false);
                     state.closeWorkspace(i);
                     return writeJsonOk(buf, id, "{}");
                 }
@@ -863,11 +879,15 @@ pub const SocketServer = struct {
 
         if (getParamInt(params, "index")) |idx| {
             if (idx >= state.workspaces.items.len) return writeJsonError(buf, id, "not_found", "Workspace index out of range");
+            if (kill) Window.WindowState.setZmxKillMode(true);
+            defer if (kill) Window.WindowState.setZmxKillMode(false);
             state.closeWorkspace(idx);
             return writeJsonOk(buf, id, "{}");
         }
 
         // Default: close active workspace
+        if (kill) Window.WindowState.setZmxKillMode(true);
+        defer if (kill) Window.WindowState.setZmxKillMode(false);
         state.closeWorkspace(state.active_workspace);
         return writeJsonOk(buf, id, "{}");
     }
@@ -1055,16 +1075,57 @@ pub const SocketServer = struct {
     }
 
     fn handleSurfaceClose(params: ?std.json.Value, id: []const u8, buf: []u8) []const u8 {
+        const Window = @import("window.zig");
+        const kill = getParamBool(params, "zmx_kill") orelse false;
         const surface_id = getParamInt(params, "surface_id") orelse {
             // Close focused pane
             const state = getActiveState() orelse return writeJsonError(buf, id, "not_ready", "No active window");
+            if (kill) Window.WindowState.setZmxKillMode(true);
+            defer if (kill) Window.WindowState.setZmxKillMode(false);
             state.closeFocusedPane();
             return writeJsonOk(buf, id, "{}");
         };
         const wm = getWindowManager() orelse return writeJsonError(buf, id, "not_ready", "Window manager not initialized");
         const state = wm.findByPaneId(surface_id) orelse return writeJsonError(buf, id, "not_found", "Surface not found");
+        if (kill) Window.WindowState.setZmxKillMode(true);
+        defer if (kill) Window.WindowState.setZmxKillMode(false);
         state.closePaneById(surface_id);
         return writeJsonOk(buf, id, "{}");
+    }
+
+    // ── zmx: close history + session sweep ─────────────────────────────
+
+    fn handleZmxUndoClose(id: []const u8, buf: []u8) []const u8 {
+        const close_history = @import("close_history.zig");
+        if (!@import("config.zig").get().zmx_attach) {
+            return writeJsonError(buf, id, "disabled", "zmx-attach is off");
+        }
+        const revived = close_history.undoLast();
+        var result_buf: [64]u8 = undefined;
+        const result = std.fmt.bufPrint(&result_buf, "{{\"revived\":{s}}}", .{if (revived) "true" else "false"}) catch
+            return writeJsonError(buf, id, "internal", "Buffer overflow");
+        return writeJsonOk(buf, id, result);
+    }
+
+    fn handleZmxKillUnattached(id: []const u8, buf: []u8) []const u8 {
+        const close_history = @import("close_history.zig");
+        if (!@import("config.zig").get().zmx_attach) {
+            return writeJsonError(buf, id, "disabled", "zmx-attach is off");
+        }
+        close_history.killUnattached();
+        return writeJsonOk(buf, id, "{\"started\":true}");
+    }
+
+    fn handleZmxStatus(id: []const u8, buf: []u8) []const u8 {
+        const close_history = @import("close_history.zig");
+        const cfg = @import("config.zig").get();
+        var result_buf: [256]u8 = undefined;
+        const result = std.fmt.bufPrint(&result_buf, "{{\"enabled\":{s},\"history\":{d},\"unattached\":{d}}}", .{
+            if (cfg.zmx_attach) "true" else "false",
+            close_history.entryCount(),
+            close_history.unattachedCount(),
+        }) catch return writeJsonError(buf, id, "internal", "Buffer overflow");
+        return writeJsonOk(buf, id, result);
     }
 
     fn handleSurfaceSendText(params: ?std.json.Value, id: []const u8, buf: []u8) []const u8 {

@@ -38,6 +38,7 @@ pub const Action = enum(u8) {
     // Panes
     new_column,
     close_pane,
+    zmx_close_pane,
     focus_left,
     focus_right,
     focus_up,
@@ -77,6 +78,10 @@ pub const Action = enum(u8) {
     toggle_fullscreen,
     quit_app,
     zmx_close_window,
+
+    // zmx close history / session cleanup
+    zmx_undo_close,
+    zmx_kill_unattached,
 
     // Command palette
     open_command_palette,
@@ -213,6 +218,9 @@ fn initDefaults() void {
     set(.new_tab, .{ .key = c.GDK_KEY_T, .ctrl = true, .shift = true });
     set(.close_tab, .{ .key = c.GDK_KEY_W, .ctrl = true, .shift = true });
     set(.zmx_close_tab, .{ .key = c.GDK_KEY_W, .ctrl = true, .shift = true, .alt = true });
+    set(.zmx_close_pane, .{ .key = c.GDK_KEY_X, .ctrl = true, .shift = true, .alt = true });
+    set(.zmx_undo_close, .{ .key = c.GDK_KEY_Z, .ctrl = true, .shift = true });
+    set(.zmx_kill_unattached, .{ .key = c.GDK_KEY_k, .ctrl = true, .alt = true });
     set(.next_tab, .{ .key = c.GDK_KEY_Tab, .ctrl = true });
     set(.prev_tab, .{ .key = c.GDK_KEY_Tab, .ctrl = true, .shift = true });
     set(.tab_1, .{ .key = c.GDK_KEY_1, .ctrl = true });
@@ -450,13 +458,11 @@ pub fn executeAction(action: Action, state: *Window.WindowState) c.gboolean {
         .new_tab => {
             if (state.activeWorkspace()) |ws| ws.newTabInFocusedGroup() catch {};
         },
-        .close_tab => {
-            if (state.activeWorkspace()) |ws| {
-                const ws_empty = ws.closeTabInFocusedGroup();
-                if (ws_empty) state.closeWorkspace(state.active_workspace);
-            }
-        },
+        .close_tab => state.closeTabFocused(),
         .zmx_close_tab => state.zmxCloseTabFocused(),
+        .zmx_close_pane => state.zmxClosePaneFocused(),
+        .zmx_undo_close => state.zmxUndoClose(),
+        .zmx_kill_unattached => state.zmxKillUnattached(),
         .next_tab => {
             if (state.activeWorkspace()) |ws| ws.nextTabInFocusedGroup();
         },

@@ -9,10 +9,6 @@ var gpa = std.heap.DebugAllocator(.{}){};
 pub const WindowManager = struct {
     allocator: std.mem.Allocator,
     windows: std.ArrayList(*Window.WindowState),
-    /// JSON snapshots of windows closed under the zmx "keep sessions on
-    /// window close" policy (detach semantics): they stay in session.json
-    /// so the next launch re-creates them and re-attaches their sessions.
-    parked_windows: std.ArrayList([]u8) = .empty,
     active_window: ?*Window.WindowState = null,
     app: *c.GtkApplication,
     autosave_timer: c.guint = 0,
@@ -104,24 +100,26 @@ pub const WindowManager = struct {
 
         // Other windows still open — safe to clean up ghostty surfaces
         // since the main loop is still running for the remaining windows.
-        // Window close routes through the kill policy
-        // ([behavior] zmx-kill-on-window-close, default OFF — the whole-app
-        // quit path above also keeps sessions, so the next seance launch
-        // re-attaches to them).
-        Window.WindowState.killZmxSessionsOfWindow(win);
-
-        // Detach semantics: with zmx on and window-kill off, the closed
-        // window is PARKED (full snapshot incl. scrollback) into the
-        // session file instead of being pruned — "close window" then just
-        // means "not showing right now", symmetric with app quit. With
-        // kills enabled (or zmx off), closing prunes as before.
-        {
+        // Window close under the zmx feature: the plain close keeps the
+        // window's sessions alive (detach, like quitting) and records the
+        // full window snapshot in the CLOSE HISTORY — a separate file,
+        // never session.json — so one undo can revive the window into
+        // this run. Kill mode (zmx_close_window / socket zmx_kill)
+        // destroys the sessions instead and records nothing. A closed
+        // window is pruned from session.json either way; whole-app quit
+        // never reaches this branch.
+        if (Window.WindowState.zmxKillMode()) {
+            Window.WindowState.killZmxSessionsOfWindow(win);
+        } else {
             const cfg = @import("config.zig").get();
-            const park = cfg.zmx_attach and !cfg.zmx_kill_on_window_close and
-                !is_last_window and !is_shutdown;
-            if (park) {
-                if (session.captureWindowJson(self.allocator, win, true)) |snap| {
-                    self.parked_windows.append(self.allocator, snap) catch {};
+            if (cfg.zmx_attach) {
+                var uuid_buf: [16384]u8 = undefined;
+                const uuids = Window.WindowState.collectZmxUuidsOfWindow(win, &uuid_buf);
+                if (session.captureWindowJson(self.allocator, win, false)) |snap| {
+                    defer self.allocator.free(snap);
+                    win.zmxTargetClosed(.window, null, 0, 0, false, uuids, snap);
+                } else {
+                    win.zmxTargetClosed(.window, null, 0, 0, false, uuids, null);
                 }
             }
         }

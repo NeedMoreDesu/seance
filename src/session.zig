@@ -75,27 +75,60 @@ fn writeMultiWindowJson(buf: *std.ArrayList(u8), alloc: Allocator, wm: anytype, 
     try writeKvInt(w, "created_at", @intCast(io.timestamp()), false);
     try w.writeAll(",\"windows\":[");
 
-    var wrote = wm.windows.items.len;
     for (wm.windows.items, 0..) |state, i| {
         if (i > 0) try w.writeByte(',');
         try writeWindowJson(w, state, include_scrollback);
-    }
-    // Windows closed under the keep-on-window-close policy are parked as
-    // raw JSON snapshots and re-emitted so the next launch restores them.
-    for (wm.parked_windows.items) |snap| {
-        if (wrote > 0) try w.writeByte(',');
-        try w.writeAll(snap);
-        wrote += 1;
     }
 
     try w.writeAll("]}");
 }
 
-/// Serialize one window to an owned JSON object string (for parking).
+/// Serialize one window to an owned JSON object string (close history).
 pub fn captureWindowJson(alloc: Allocator, state: anytype, include_scrollback: bool) ?[]u8 {
     var output: std.Io.Writer.Allocating = .init(alloc);
     defer output.deinit();
     writeWindowJson(&output.writer, state, include_scrollback) catch return null;
+    return output.toOwnedSlice() catch null;
+}
+
+/// Serialize one workspace to an owned JSON object string (close history).
+pub fn captureWorkspaceJson(alloc: Allocator, ws: *Workspace) ?[]u8 {
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    defer output.deinit();
+    writeWorkspace(&output.writer, ws, false) catch return null;
+    return output.toOwnedSlice() catch null;
+}
+
+/// Serialize one panel to an owned JSON object string (close history).
+pub fn capturePanelJson(alloc: Allocator, panel: Panel) ?[]u8 {
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    defer output.deinit();
+    writePanel(&output.writer, panel, false) catch return null;
+    return output.toOwnedSlice() catch null;
+}
+
+/// Close-history snapshot for a batch of doomed terminal panels plus the
+/// column they lived in: `{"col_width":..,"col_layout_mode":..,"panels":[..]}`.
+/// Pass `col_width` <= 0 when the column context is unknown.
+pub fn captureColumnSnapshot(alloc: Allocator, col_width: f64, col_tabbed: bool, doomed: []const Panel) ?[]u8 {
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    defer output.deinit();
+    const w = &output.writer;
+    w.writeAll("{") catch return null;
+    writeKvFloat(w, "col_width", col_width, true) catch return null;
+    if (col_width > 0) {
+        writeKvStr(w, "col_layout_mode", if (col_tabbed) "tabbed" else "stacked", false) catch return null;
+    }
+    w.writeAll(",\"panels\":[") catch return null;
+    var first = true;
+    for (doomed) |panel| {
+        if (!first) {
+            w.writeByte(',') catch return null;
+        }
+        first = false;
+        writePanel(w, panel, false) catch return null;
+    }
+    w.writeAll("]}") catch return null;
     return output.toOwnedSlice() catch null;
 }
 
@@ -563,52 +596,102 @@ fn restoreFromJsonAll(wm: anytype, root: std.json.Value) bool {
 
     var restored_count: usize = 0;
     for (win_array.items) |win_val| {
-        const win_obj = switch (win_val) {
-            .object => |o| o,
-            else => continue,
-        };
-
-        const state = Window.create(wm) catch continue;
-        wm.windows.append(wm.allocator, state) catch continue;
-        wm.active_window = state;
-
-        // Restore window dimensions. Ignore corrupt values so a bad session
-        // file doesn't crash startup via an out-of-range @intCast.
-        if (jsonInt(win_obj, "width")) |w| {
-            if (jsonInt(win_obj, "height")) |h| {
-                if (w > 0 and h > 0 and w <= 16384 and h <= 16384) {
-                    c.gtk_window_set_default_size(
-                        @as(*c.GtkWindow, @ptrCast(state.gtk_window)),
-                        @intCast(w),
-                        @intCast(h),
-                    );
-                }
-            }
-        }
-
-        if (restoreWindowContent(state, win_obj)) {
-            c.gtk_window_present(@as(*c.GtkWindow, @ptrCast(state.gtk_window)));
-            restored_count += 1;
-        } else {
-            // Failed to restore — remove phantom window from list.
-            // Mark destroyed first so onCloseRequest won't re-enter closeWindow.
-            state.destroyed = true;
-            for (wm.windows.items, 0..) |w, wi| {
-                if (w == state) {
-                    _ = wm.windows.orderedRemove(wi);
-                    break;
-                }
-            }
-            c.gtk_window_destroy(@as(*c.GtkWindow, @ptrCast(state.gtk_window)));
-            wm.active_window = if (wm.windows.items.len > 0) wm.windows.items[wm.windows.items.len - 1] else null;
-        }
+        if (reviveWindowJson(wm, win_val, false)) restored_count += 1;
     }
 
     return restored_count > 0;
 }
 
+/// Recreate a window from a saved (or close-history) window object. With
+/// `force` the persisted pane/tab UUIDs are re-adopted even if this
+/// process issued them before — the undo/revive case, where the previous
+/// owner was destroyed and the id must survive so the shell re-attaches
+/// to the SAME zmx session.
+pub fn reviveWindowJson(wm: anytype, win_val: std.json.Value, force: bool) bool {
+    const obj = switch (win_val) {
+        .object => |o| o,
+        else => return false,
+    };
+
+    const state = Window.create(wm) catch return false;
+    wm.windows.append(wm.allocator, state) catch return false;
+    wm.active_window = state;
+
+    // Restore window dimensions. Ignore corrupt values so a bad session
+    // file doesn't crash startup via an out-of-range @intCast.
+    if (jsonInt(obj, "width")) |w| {
+        if (jsonInt(obj, "height")) |h| {
+            if (w > 0 and h > 0 and w <= 16384 and h <= 16384) {
+                c.gtk_window_set_default_size(
+                    @as(*c.GtkWindow, @ptrCast(state.gtk_window)),
+                    @intCast(w),
+                    @intCast(h),
+                );
+            }
+        }
+    }
+
+    if (restoreWindowContent(state, obj, force)) {
+        c.gtk_window_present(@as(*c.GtkWindow, @ptrCast(state.gtk_window)));
+        return true;
+    }
+
+    // Failed to restore - remove phantom window from list.
+    // Mark destroyed first so onCloseRequest won't re-enter closeWindow.
+    state.destroyed = true;
+    for (wm.windows.items, 0..) |w, wi| {
+        if (w == state) {
+            _ = wm.windows.orderedRemove(wi);
+            break;
+        }
+    }
+    c.gtk_window_destroy(@as(*c.GtkWindow, @ptrCast(state.gtk_window)));
+    wm.active_window = if (wm.windows.items.len > 0) wm.windows.items[wm.windows.items.len - 1] else null;
+    return false;
+}
+
+/// Close-history undo: recreate a workspace (tab) inside a live window at
+/// (or nearest to) its recorded index.
+pub fn reviveWorkspaceInto(state: *WindowState, ws_val: std.json.Value, index: usize) bool {
+    if (!restoreWorkspace(state, ws_val, true)) return false;
+    const last = state.workspaces.items.len - 1;
+    const target = @min(index, last);
+    if (target != last) {
+        const ws = state.workspaces.items[last];
+        _ = state.workspaces.orderedRemove(last);
+        state.workspaces.insert(state.alloc, target, ws) catch {};
+    }
+    return true;
+}
+
+/// Close-history undo: re-add a doomed terminal panel to (the revived or
+/// existing) group. With `adopt_first` the group's already-spawned first
+/// panel (created by addColumn) is taken over instead of spawning another.
+pub fn reviveTerminalPanel(group: *PaneGroup, panel_val: std.json.Value, adopt_first: bool) ?*Pane {
+    const obj = switch (panel_val) {
+        .object => |o| o,
+        else => return null,
+    };
+    const panel_type = jsonStr(obj, "type") orelse return null;
+    if (!std.mem.eql(u8, panel_type, "terminal")) return null;
+
+    var panel: Panel = if (adopt_first and group.panels.items.len > 0)
+        group.panels.items[0]
+    else blk: {
+        var panel_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const cwd = getTerminalPanelCwd(&panel_cwd_buf, obj);
+        const pane = group.newPanel(cwd) catch return null;
+        break :blk Panel{ .terminal = pane };
+    };
+
+    restorePaneUuid(panel, obj, true);
+    restorePanelCustomTitle(group, panel, obj);
+    restorePanelHeightWeight(panel, obj);
+    return panel.asTerminal();
+}
+
 /// Restore workspaces, sidebar visibility, etc. into a WindowState.
-fn restoreWindowContent(state: *WindowState, obj: std.json.ObjectMap) bool {
+fn restoreWindowContent(state: *WindowState, obj: std.json.ObjectMap, force: bool) bool {
     const ws_array = switch (obj.get("workspaces") orelse return false) {
         .array => |a| a,
         else => return false,
@@ -622,7 +705,7 @@ fn restoreWindowContent(state: *WindowState, obj: std.json.ObjectMap) bool {
 
     var restored_count: usize = 0;
     for (ws_array.items) |ws_val| {
-        if (restoreWorkspace(state, ws_val)) {
+        if (restoreWorkspace(state, ws_val, force)) {
             restored_count += 1;
         }
     }
@@ -656,7 +739,7 @@ fn restoreWindowContent(state: *WindowState, obj: std.json.ObjectMap) bool {
     return true;
 }
 
-fn restoreWorkspace(state: *WindowState, ws_val: std.json.Value) bool {
+fn restoreWorkspace(state: *WindowState, ws_val: std.json.Value, force: bool) bool {
     const obj = switch (ws_val) {
         .object => |o| o,
         else => return false,
@@ -670,11 +753,11 @@ fn restoreWorkspace(state: *WindowState, ws_val: std.json.Value) bool {
     const type_str = jsonStr(layout_obj, "type") orelse return false;
     if (!std.mem.eql(u8, type_str, "columns")) return false;
 
-    return restoreWorkspaceColumns(state, obj, layout_obj);
+    return restoreWorkspaceColumns(state, obj, layout_obj, force);
 }
 
 /// Restore column layout.
-fn restoreWorkspaceColumns(state: *WindowState, obj: std.json.ObjectMap, layout_obj: std.json.ObjectMap) bool {
+fn restoreWorkspaceColumns(state: *WindowState, obj: std.json.ObjectMap, layout_obj: std.json.ObjectMap, force: bool) bool {
     const Column = @import("column.zig").Column;
     const columns_array = switch (layout_obj.get("columns") orelse return false) {
         .array => |a| a,
@@ -718,7 +801,7 @@ fn restoreWorkspaceColumns(state: *WindowState, obj: std.json.ObjectMap, layout_
         return false;
     };
 
-    applyWorkspaceMetadata(ws, obj);
+    applyWorkspaceMetadata(ws, obj, force);
 
     // Restore first column (already created with workspace)
     if (ws.columns.items.len > 0) {
@@ -750,7 +833,7 @@ fn restoreWorkspaceColumns(state: *WindowState, obj: std.json.ObjectMap, layout_
                             else => null,
                         };
                         if (go) |grp_obj| {
-                            restoreGroupPanels(ws.columns.items[0].groups.items[0], grp_obj);
+                            restoreGroupPanels(ws.columns.items[0].groups.items[0], grp_obj, force);
                         }
                     }
                 }
@@ -805,7 +888,7 @@ fn restoreWorkspaceColumns(state: *WindowState, obj: std.json.ObjectMap, layout_
                 ws.columns.items[new_col_idx].stacked_anim = 0.0;
             }
         }
-        restoreGroupPanels(new_grp, grp_obj);
+        restoreGroupPanels(new_grp, grp_obj, force);
         // Same as above: exit stacked mode for tabbed columns.
         if (ws.columns.items[new_col_idx].layout_mode == .tabbed) {
             new_grp.exitStackedMode();
@@ -838,7 +921,7 @@ fn getFirstCwdFromGroupObj(obj: std.json.ObjectMap) ?[]const u8 {
     return jsonStr(first_panel, "cwd");
 }
 
-fn restoreGroupPanels(group: *PaneGroup, obj: std.json.ObjectMap) void {
+fn restoreGroupPanels(group: *PaneGroup, obj: std.json.ObjectMap, force: bool) void {
     const panels_array = switch (obj.get("panels") orelse return) {
         .array => |a| a,
         else => return,
@@ -852,7 +935,7 @@ fn restoreGroupPanels(group: *PaneGroup, obj: std.json.ObjectMap) void {
             else => null,
         };
         if (first_panel_obj) |fpo| {
-            restorePaneUuid(group.panels.items[0], fpo);
+            restorePaneUuid(group.panels.items[0], fpo, force);
             restorePanelScrollback(group.panels.items[0], fpo);
             restorePanelCustomTitle(group, group.panels.items[0], fpo);
             restorePanelHeightWeight(group.panels.items[0], fpo);
@@ -871,7 +954,7 @@ fn restoreGroupPanels(group: *PaneGroup, obj: std.json.ObjectMap) void {
             const cwd = getTerminalPanelCwd(&panel_cwd_buf, panel_obj);
             const pane = group.newPanel(cwd) catch continue;
             const panel = Panel{ .terminal = pane };
-            restorePaneUuid(panel, panel_obj);
+            restorePaneUuid(panel, panel_obj, force);
             restorePanelScrollback(panel, panel_obj);
             restorePanelCustomTitle(group, panel, panel_obj);
             restorePanelHeightWeight(panel, panel_obj);
@@ -883,7 +966,7 @@ fn restoreGroupPanels(group: *PaneGroup, obj: std.json.ObjectMap) void {
     group.switchToPanel(@min(active, if (group.panels.items.len > 0) group.panels.items.len - 1 else 0));
 }
 
-fn applyWorkspaceMetadata(ws: *Workspace, obj: std.json.ObjectMap) void {
+fn applyWorkspaceMetadata(ws: *Workspace, obj: std.json.ObjectMap, force: bool) void {
     if (jsonStr(obj, "title")) |t| ws.setTitle(t);
     if (jsonStr(obj, "custom_title")) |t| ws.setCustomTitle(t);
     if (jsonStr(obj, "custom_color")) |col| ws.setCustomColor(col);
@@ -898,8 +981,15 @@ fn applyWorkspaceMetadata(ws: *Workspace, obj: std.json.ObjectMap) void {
         if (id.len == uuid.len) {
             var candidate: [uuid.len]u8 = undefined;
             @memcpy(candidate[0..], id[0..uuid.len]);
-            // Keep the minted fresh UUID if the file smuggles a duplicate.
-            if (uuid.claim(&candidate)) ws.tab_uuid = candidate;
+            if (force) {
+                // Revive from close history: re-adopt the closed tab's own
+                // id so pane entries anchored to it keep matching.
+                uuid.force(&candidate);
+                ws.tab_uuid = candidate;
+            } else if (uuid.claim(&candidate)) {
+                // Keep the minted fresh UUID if the file smuggles a duplicate.
+                ws.tab_uuid = candidate;
+            }
         }
     }
 }
@@ -928,12 +1018,19 @@ fn restorePanelHeightWeight(panel: Panel, obj: std.json.ObjectMap) void {
     pane.height_weight = std.math.clamp(w, 0.1, 10.0);
 }
 
-fn restorePaneUuid(panel: Panel, obj: std.json.ObjectMap) void {
+fn restorePaneUuid(panel: Panel, obj: std.json.ObjectMap, force: bool) void {
     const id = jsonStr(obj, "pane_uuid") orelse return;
     if (id.len != uuid.len) return;
     const pane = panel.asTerminal() orelse return;
     var candidate: [uuid.len]u8 = undefined;
     @memcpy(candidate[0..], id[0..uuid.len]);
+    if (force) {
+        // Revive from close history: re-adopt the closed pane's own UUID
+        // so the shell re-attaches to its surviving zmx session.
+        uuid.force(&candidate);
+        pane.pane_uuid = candidate;
+        return;
+    }
     // Keep the minted fresh UUID if the file smuggles a duplicate.
     if (uuid.claim(&candidate)) pane.pane_uuid = candidate;
 }

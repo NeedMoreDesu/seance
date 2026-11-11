@@ -474,12 +474,21 @@ pub const PaneGroup = struct {
     pub fn closeOtherPanels(self: *PaneGroup, keep_index: usize) void {
         if (keep_index >= self.panels.items.len) return;
         if (self.in_stacked_mode) {
-            // Remove panels manually in reverse order
+            // Stacked-mode removal fires no AdwTabView signal: capture the
+            // doomed panels' zmx state in ONE close-history entry first,
+            // then remove them in reverse index order.
+            var doomed: std.ArrayList(Panel) = .empty;
+            defer doomed.deinit(self.alloc);
             var i = self.panels.items.len;
             while (i > 0) {
                 i -= 1;
+                if (i != keep_index) doomed.append(self.alloc, self.panels.items[i]) catch {};
+            }
+            zmxPanelsClosed(self, doomed.items);
+            i = self.panels.items.len;
+            while (i > 0) {
+                i -= 1;
                 if (i != keep_index) {
-                    killZmxForPanel(self.panels.items[i]);
                     _ = self.removePanel(i);
                 }
             }
@@ -494,10 +503,16 @@ pub const PaneGroup = struct {
     pub fn closePanelsToRight(self: *PaneGroup, from_index: usize) void {
         if (from_index >= self.panels.items.len) return;
         if (self.in_stacked_mode) {
+            var doomed: std.ArrayList(Panel) = .empty;
+            defer doomed.deinit(self.alloc);
+            var j: usize = from_index + 1;
+            while (j < self.panels.items.len) : (j += 1) {
+                doomed.append(self.alloc, self.panels.items[j]) catch {};
+            }
+            zmxPanelsClosed(self, doomed.items);
             var i = self.panels.items.len;
             while (i > from_index + 1) {
                 i -= 1;
-                killZmxForPanel(self.panels.items[i]);
                 _ = self.removePanel(i);
             }
         } else {
@@ -584,16 +599,76 @@ fn panelTitle(panel: Panel) []const u8 {
 
 // ── AdwTabView signal handlers ─────────────────────────────────────
 
-/// Kill the zmx session owned by a terminal panel that is being removed by
-/// an explicit close which does NOT route through WindowState.closePaneById /
-/// closeWorkspace (stacked-mode removal loops, user-initiated page detach).
-/// killZmxSessions copies the UUID synchronously, so this is safe to call
-/// while the panel is still alive, just before it is destroyed.
-fn killZmxForPanel(panel: Panel) void {
-    const pane = panel.asTerminal() orelse return;
-    if (pane.pane_uuid[0] == 0) return;
+/// Close-path zmx cleanup for panels removed by an explicit close that
+/// does NOT route through WindowState.closePaneById / closeWorkspaceCap
+/// (stacked-mode removal loops, user-initiated page detach via the ×
+/// button / context menu). Captures the doomed panels' session UUIDs and
+/// revive snapshot while they are still alive, then funnels everything
+/// through the WindowState chokepoint: kill mode destroys the sessions,
+/// the default keeps them and records one close-history entry per batch
+/// (one undo restores all panels of this action).
+fn zmxPanelsClosed(self: *PaneGroup, doomed: []const Panel) void {
     const Window = @import("window.zig");
-    Window.WindowState.killZmxSessions(pane.pane_uuid[0..], .terminal);
+    const Workspace = @import("workspace.zig").Workspace;
+    const uuid = @import("uuid.zig");
+    const cfg = @import("config.zig").get();
+    if (!cfg.zmx_attach) return;
+    const wm = Window.window_manager orelse return;
+    const state = wm.findByWorkspaceId(self.workspace_id) orelse return;
+
+    var ws_found: ?*Workspace = null;
+    for (state.workspaces.items) |ws| {
+        if (ws.id == self.workspace_id) ws_found = ws;
+    }
+    const ws = ws_found orelse return;
+
+    // Column context (live index + width + mode) for the undo placement.
+    var col_index: usize = 0;
+    var col_width: f64 = 0;
+    var col_tabbed = false;
+    var live: usize = 0;
+    for (ws.columns.items) |*col| {
+        if (col.closing) continue;
+        var hit = false;
+        for (col.groups.items) |g| {
+            if (g.id == self.id) hit = true;
+        }
+        if (hit) {
+            col_index = live;
+            col_width = col.target_width;
+            col_tabbed = col.layout_mode == .tabbed;
+            break;
+        }
+        live += 1;
+    }
+
+    // UUIDs (space-separated) + snapshot, copied out before teardown.
+    var uuid_buf: [4096]u8 = undefined;
+    var pos: usize = 0;
+    const session_mod = @import("session.zig");
+    var json: ?[]u8 = null;
+    if (!Window.WindowState.zmxKillMode()) {
+        json = session_mod.captureColumnSnapshot(state.alloc, col_width, col_tabbed, doomed);
+    }
+    const uuids = blk: {
+        var first = true;
+        for (doomed) |panel| {
+            const tp = panel.asTerminal() orelse continue;
+            if (tp.pane_uuid[0] == 0) continue;
+            if (pos + uuid.len + 1 > uuid_buf.len) break;
+            if (!first) {
+                uuid_buf[pos] = ' ';
+                pos += 1;
+            }
+            first = false;
+            @memcpy(uuid_buf[pos..][0..uuid.len], &tp.pane_uuid);
+            pos += uuid.len;
+        }
+        break :blk uuid_buf[0..pos];
+    };
+
+    Window.WindowState.zmxTargetClosed(state, .pane, ws.tab_uuid, col_index, col_width, col_tabbed, uuids, json);
+    if (json) |j| state.alloc.free(j);
 }
 
 fn onClosePage(_: *c.AdwTabView, page: *c.AdwTabPage, user_data: c.gpointer) callconv(.c) c.gboolean {
@@ -629,8 +704,9 @@ fn onPageDetached(tab_view: *c.AdwTabView, page: *c.AdwTabPage, _: c.gint, user_
     // User-initiated close (clicked tab close button): clean up the panel
     if (self.findPanelIndexByWidget(child)) |idx| {
         const panel = self.panels.items[idx];
-        // Explicit terminal close: kill its zmx session before teardown.
-        killZmxForPanel(panel);
+        // Explicit terminal close: keep its session + record a revive
+        // snapshot (or kill under kill-mode) before teardown.
+        zmxPanelsClosed(self, &.{panel});
         _ = self.panels.orderedRemove(idx);
         panel.destroy(self.alloc);
         if (self.active_panel >= self.panels.items.len and self.panels.items.len > 0) {

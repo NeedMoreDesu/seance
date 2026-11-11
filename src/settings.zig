@@ -45,8 +45,7 @@ const Widgets = struct {
     opencode_hooks: ?*c.GtkWidget = null,
     antigravity_hooks: ?*c.GtkWidget = null,
     zmx_attach: ?*c.GtkWidget = null,
-    zmx_kill_on_terminal_close: ?*c.GtkWidget = null,
-    zmx_kill_on_window_close: ?*c.GtkWidget = null,
+    zmx_shortcut_rows: [zmx_shortcut_defs.len]?*c.GtkWidget = [_]?*c.GtkWidget{null} ** zmx_shortcut_defs.len,
 
     // Combos
     notification_sound: ?*c.GtkWidget = null,
@@ -455,19 +454,32 @@ fn buildIntegrationsSection(page: *c.GtkWidget, cfg: *const config_mod.Config) v
     w.port_range = addSpinRow(g3, "Port Range Size", "Number of ports per workspace.", 1, 100, 1, @floatFromInt(cfg.port_range));
     addToPage(page, g3);
 
-    // Card 4: zmx session persistence
+    // Card 4: zmx session persistence — master switch, then its keybinds
+    // (kept out of the general Keyboard list; visible only when enabled).
     const g4 = newGroup("zmx");
-    c.adw_preferences_group_set_description(@as(*c.AdwPreferencesGroup, @ptrCast(g4)), "zmx keeps each terminal alive in its own session that survives seance restarts (re-attached on next launch). Requires the zmx binary. Changes apply to new panes; sessions of closed terminals follow the kill policy below.");
+    c.adw_preferences_group_set_description(@as(*c.AdwPreferencesGroup, @ptrCast(g4)), "zmx keeps each terminal alive in its own session that survives seance restarts (re-attached on next launch). Requires the zmx binary. Changes apply to new panes. Closing a pane/tab/window KEEPS its sessions detached and remembers the close for 'Undo Tab Close'; the kill-close shortcuts below close the same things but destroy the sessions instead. Quitting seance never kills anything.");
     w.zmx_attach = addSwitchRow(g4, "Use zmx sessions", "Every terminal pane runs inside a persistent zmx session named by its UUID.", cfg.zmx_attach);
-    w.zmx_kill_on_terminal_close = addSwitchRow(g4, "Close terminal kills session", "Closing a split, panel tab, or workspace kills its session. Off: it detaches and the session lives until quit.", cfg.zmx_kill_on_terminal_close);
-    w.zmx_kill_on_window_close = addSwitchRow(g4, "Close window kills sessions", "Off by default: closing a window behaves like quitting — sessions survive and re-attach on the next launch.", cfg.zmx_kill_on_window_close);
+    for (zmx_shortcut_defs, 0..) |def, i| {
+        w.zmx_shortcut_rows[i] = addShortcutRow(g4, def.action, def.label);
+    }
     setZmxRowsVisible(cfg.zmx_attach);
     addToPage(page, g4);
 }
 
+/// Undo/close-kill shortcuts belong under the zmx switch, not in the
+/// main keyboard list.
+const zmx_shortcut_defs = [_]ShortcutDef{
+    .{ .action = .zmx_close_pane, .label = "Close Pane (zmx: kill session)" },
+    .{ .action = .zmx_close_tab, .label = "Close Tab (zmx: kill session)" },
+    .{ .action = .zmx_close_window, .label = "Close Window (zmx: kill session)" },
+    .{ .action = .zmx_undo_close, .label = "Undo Tab Close (zmx)" },
+    .{ .action = .zmx_kill_unattached, .label = "Kill Unattached zmx Sessions" },
+};
+
 fn setZmxRowsVisible(enabled: bool) void {
-    if (w.zmx_kill_on_terminal_close) |r| c.gtk_widget_set_visible(r, if (enabled) 1 else 0);
-    if (w.zmx_kill_on_window_close) |r| c.gtk_widget_set_visible(r, if (enabled) 1 else 0);
+    for (w.zmx_shortcut_rows) |maybe_row| {
+        if (maybe_row) |row| c.gtk_widget_set_visible(row, if (enabled) 1 else 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -497,7 +509,6 @@ const shortcut_defs = [_]ShortcutDef{
     .{ .action = .workspace_9, .label = "Workspace 9" },
     .{ .action = .new_tab, .label = "New Tab" },
     .{ .action = .close_tab, .label = "Close Tab" },
-    .{ .action = .zmx_close_tab, .label = "Close Tab (zmx: toggle session kill)" },
     .{ .action = .next_tab, .label = "Next Tab" },
     .{ .action = .prev_tab, .label = "Previous Tab" },
     .{ .action = .tab_1, .label = "Tab 1" },
@@ -531,7 +542,6 @@ const shortcut_defs = [_]ShortcutDef{
     .{ .action = .rename_workspace, .label = "Rename Workspace" },
     .{ .action = .toggle_pin, .label = "Toggle Pin" },
     .{ .action = .new_window, .label = "New Window" },
-    .{ .action = .zmx_close_window, .label = "Close Window (zmx: toggle session kill)" },
     .{ .action = .open_command_palette, .label = "Command Palette" },
     .{ .action = .open_folder, .label = "Open Folder" },
     .{ .action = .reload_config, .label = "Reload Config" },
@@ -551,40 +561,47 @@ fn buildKeyboardSection(page: *c.GtkWidget, _: *const config_mod.Config) void {
     c.adw_preferences_group_set_description(@as(*c.AdwPreferencesGroup, @ptrCast(g1)), "Click a shortcut value to record a new binding. Set to \xe2\x80\x98unset\xe2\x80\x99 in config to disable.");
 
     for (shortcut_defs) |def| {
-        const row = c.adw_action_row_new();
-        c.adw_preferences_row_set_title(@as(*c.AdwPreferencesRow, @ptrCast(row)), def.label);
-
-        const hbox = c.gtk_box_new(c.GTK_ORIENTATION_HORIZONTAL, 4);
-        c.gtk_widget_set_valign(hbox, c.GTK_ALIGN_CENTER);
-
-        // Shortcut button
-        var display_buf: [64]u8 = undefined;
-        const dlen = keybinds.displayString(def.action, &display_buf);
-        const label_text: [*:0]const u8 = if (dlen > 0) blk: {
-            display_buf[dlen] = 0;
-            break :blk @ptrCast(&display_buf);
-        } else "unset";
-
-        const btn = c.gtk_button_new_with_label(label_text);
-        c.gtk_widget_add_css_class(@as(*c.GtkWidget, @ptrCast(btn)), "flat");
-        c.gtk_widget_set_size_request(@as(*c.GtkWidget, @ptrCast(btn)), 160, -1);
-        _ = c.g_signal_connect_data(@as(c.gpointer, @ptrCast(btn)), "clicked", @as(c.GCallback, @ptrCast(&onShortcutButtonClicked)), null, null, 0);
-        shortcut_buttons[@intFromEnum(def.action)] = @as(*c.GtkWidget, @ptrCast(btn));
-
-        // Clear button
-        const clear_btn = c.gtk_button_new_from_icon_name("edit-clear-symbolic");
-        c.gtk_widget_add_css_class(@as(*c.GtkWidget, @ptrCast(clear_btn)), "flat");
-        c.gtk_widget_set_tooltip_text(@as(*c.GtkWidget, @ptrCast(clear_btn)), "Unbind");
-        _ = c.g_signal_connect_data(@as(c.gpointer, @ptrCast(clear_btn)), "clicked", @as(c.GCallback, @ptrCast(&onClearShortcutClicked)), null, null, 0);
-
-        c.gtk_box_append(@as(*c.GtkBox, @ptrCast(hbox)), @as(*c.GtkWidget, @ptrCast(btn)));
-        c.gtk_box_append(@as(*c.GtkBox, @ptrCast(hbox)), @as(*c.GtkWidget, @ptrCast(clear_btn)));
-
-        c.adw_action_row_add_suffix(@as(*c.AdwActionRow, @ptrCast(row)), hbox);
-        c.adw_preferences_group_add(@as(*c.AdwPreferencesGroup, @ptrCast(g1)), @as(*c.GtkWidget, @ptrCast(row)));
+        _ = addShortcutRow(g1, def.action, def.label);
     }
 
     addToPage(page, g1);
+}
+
+/// One rebindable shortcut row (record button + unbind button) appended
+/// to `group`; the button is registered so the recorder can find it.
+fn addShortcutRow(group: *c.GtkWidget, action: keybinds.Action, label: [*:0]const u8) *c.GtkWidget {
+    const row = c.adw_action_row_new();
+    c.adw_preferences_row_set_title(@as(*c.AdwPreferencesRow, @ptrCast(row)), label);
+
+    const hbox = c.gtk_box_new(c.GTK_ORIENTATION_HORIZONTAL, 4);
+    c.gtk_widget_set_valign(hbox, c.GTK_ALIGN_CENTER);
+
+    // Shortcut button
+    var display_buf: [64]u8 = undefined;
+    const dlen = keybinds.displayString(action, &display_buf);
+    const label_text: [*:0]const u8 = if (dlen > 0) blk: {
+        display_buf[dlen] = 0;
+        break :blk @ptrCast(&display_buf);
+    } else "unset";
+
+    const btn = c.gtk_button_new_with_label(label_text);
+    c.gtk_widget_add_css_class(@as(*c.GtkWidget, @ptrCast(btn)), "flat");
+    c.gtk_widget_set_size_request(@as(*c.GtkWidget, @ptrCast(btn)), 160, -1);
+    _ = c.g_signal_connect_data(@as(c.gpointer, @ptrCast(btn)), "clicked", @as(c.GCallback, @ptrCast(&onShortcutButtonClicked)), null, null, 0);
+    shortcut_buttons[@intFromEnum(action)] = @as(*c.GtkWidget, @ptrCast(btn));
+
+    // Clear button
+    const clear_btn = c.gtk_button_new_from_icon_name("edit-clear-symbolic");
+    c.gtk_widget_add_css_class(@as(*c.GtkWidget, @ptrCast(clear_btn)), "flat");
+    c.gtk_widget_set_tooltip_text(@as(*c.GtkWidget, @ptrCast(clear_btn)), "Unbind");
+    _ = c.g_signal_connect_data(@as(c.gpointer, @ptrCast(clear_btn)), "clicked", @as(c.GCallback, @ptrCast(&onClearShortcutClicked)), null, null, 0);
+
+    c.gtk_box_append(@as(*c.GtkBox, @ptrCast(hbox)), @as(*c.GtkWidget, @ptrCast(btn)));
+    c.gtk_box_append(@as(*c.GtkBox, @ptrCast(hbox)), @as(*c.GtkWidget, @ptrCast(clear_btn)));
+
+    c.adw_action_row_add_suffix(@as(*c.AdwActionRow, @ptrCast(row)), hbox);
+    c.adw_preferences_group_add(@as(*c.AdwPreferencesGroup, @ptrCast(group)), @as(*c.GtkWidget, @ptrCast(row)));
+    return @as(*c.GtkWidget, @ptrCast(row));
 }
 
 // ---------------------------------------------------------------------------
@@ -722,10 +739,6 @@ fn onSwitchChanged(obj: *c.GObject, _: *c.GParamSpec, _: c.gpointer) callconv(.c
     } else if (widget == w.zmx_attach) {
         cfg.zmx_attach = active;
         setZmxRowsVisible(active);
-    } else if (widget == w.zmx_kill_on_terminal_close) {
-        cfg.zmx_kill_on_terminal_close = active;
-    } else if (widget == w.zmx_kill_on_window_close) {
-        cfg.zmx_kill_on_window_close = active;
     } else return;
 
     saveAndReload();
@@ -889,8 +902,8 @@ fn onFontChanged(obj: *c.GObject, _: *c.GParamSpec, _: c.gpointer) callconv(.c) 
 fn onShortcutButtonClicked(button: *c.GtkButton, _: c.gpointer) callconv(.c) void {
     const btn_widget: *c.GtkWidget = @ptrCast(button);
 
-    // Find which action this button belongs to
-    for (shortcut_defs) |def| {
+    // Find which action this button belongs to (main list or zmx card)
+    for (shortcut_defs ++ zmx_shortcut_defs) |def| {
         if (shortcut_buttons[@intFromEnum(def.action)] == btn_widget) {
             // Start recording
             recording_action = def.action;
@@ -909,7 +922,7 @@ fn onClearShortcutClicked(button: *c.GtkButton, _: c.gpointer) callconv(.c) void
     const parent = c.gtk_widget_get_parent(clear_widget) orelse return;
     const first_child = c.gtk_widget_get_first_child(parent) orelse return;
 
-    for (shortcut_defs) |def| {
+    for (shortcut_defs ++ zmx_shortcut_defs) |def| {
         if (shortcut_buttons[@intFromEnum(def.action)] == first_child) {
             keybinds.setBinding(def.action, .{ .enabled = false });
             updateShortcutButtonLabel(def.action);

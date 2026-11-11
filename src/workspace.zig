@@ -2222,23 +2222,27 @@ pub const Workspace = struct {
         group.focus();
     }
 
+    /// True when closing one pane/tab in the focused group empties the
+    /// whole workspace (the single live column holds the single panel) —
+    /// the case where the dispatcher pre-captures the workspace snapshot
+    /// so one undo restores the doomed pane together with its tab.
+    pub fn willEmptyAfterPaneClose(self: *Workspace) bool {
+        if (self.liveColumnCount() != 1) return false;
+        const grp = self.focusedGroup() orelse return false;
+        return grp.panels.items.len <= 1;
+    }
+
     pub fn closeTabInFocusedGroup(self: *Workspace) bool {
         const grp = self.focusedGroup() orelse return true;
-        // Capture the doomed pane's zmx session UUID before removal:
-        // removeActivePanel destroys the panel via a programmatic close-page
-        // (cleanup handlers suppressed), so nothing else kills the session.
-        var doomed_uuid: ?[uuid.len]u8 = null;
         if (grp.focusedTerminalPane()) |pane| {
             self.clearPaneHistoryFor(pane.id);
-            doomed_uuid = pane.pane_uuid;
         }
+        // removeActivePanel destroys the panel via a programmatic
+        // close-page (detached-handler cleanup is suppressed). zmx
+        // session keep/kill handling lives in WindowState, which knows
+        // the window context and captures the doomed panel BEFORE this
+        // call (Window.closeTabFocused).
         const empty = grp.removeActivePanel();
-        if (doomed_uuid) |u| {
-            if (u[0] != 0) {
-                const Window = @import("window.zig");
-                Window.WindowState.killZmxSessions(u[0..], .terminal);
-            }
-        }
         if (empty) {
             return self.closeEmptyGroup(grp.id);
         }

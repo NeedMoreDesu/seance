@@ -74,16 +74,12 @@ pub const Config = struct {
     // zmx integration: every terminal pane exec's `zmx attach
     // seance-<pane-uuid>` as its shell, giving each terminal a persistent
     // session keyed on its UUID (survives seance restarts for re-attach).
-    // Off by default — requires the zmx binary on PATH.
+    // Closing a pane/tab/window keeps its session detached and records a
+    // revive snapshot in the close history; explicit kill-close keybinds
+    // and the kill-unattached sweep destroy sessions on demand; a
+    // whole-app quit never kills. Off by default — requires the zmx
+    // binary on PATH.
     zmx_attach: bool = false,
-
-    // Session-kill policy while zmx_attach is on. Closing a terminal
-    // (split/panel/tab, incl. last-pane cascades) kills its session by
-    // default. Closing a WINDOW keeps sessions by default — same as whole-
-    // app quit — so a stray window close behaves like detach, not delete;
-    // sessions are re-attached on the next launch.
-    zmx_kill_on_terminal_close: bool = true,
-    zmx_kill_on_window_close: bool = false,
 
     // Notifications
     notification_sound: NotificationSound = .default,
@@ -295,8 +291,6 @@ pub fn saveConfig(cfg: *const Config) void {
     writeBool(w, "opencode-hooks", cfg.opencode_hooks) catch return;
     writeBool(w, "antigravity-hooks", cfg.antigravity_hooks) catch return;
     writeBool(w, "zmx-attach", cfg.zmx_attach) catch return;
-    writeBool(w, "zmx-kill-on-terminal-close", cfg.zmx_kill_on_terminal_close) catch return;
-    writeBool(w, "zmx-kill-on-window-close", cfg.zmx_kill_on_window_close) catch return;
 
     // [notifications]
     w.print("\n[notifications]\n", .{}) catch return;
@@ -515,12 +509,6 @@ fn applyValue(config: *Config, section: []const u8, key: []const u8, raw_val: []
             return true;
         } else if (eql(key, "zmx-attach")) {
             config.zmx_attach = parseBool(val) orelse config.zmx_attach;
-            return true;
-        } else if (eql(key, "zmx-kill-on-terminal-close")) {
-            config.zmx_kill_on_terminal_close = parseBool(val) orelse config.zmx_kill_on_terminal_close;
-            return true;
-        } else if (eql(key, "zmx-kill-on-window-close")) {
-            config.zmx_kill_on_window_close = parseBool(val) orelse config.zmx_kill_on_window_close;
             return true;
         }
     } else if (eql(section, "notifications")) {

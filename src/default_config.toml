@@ -43,15 +43,20 @@
                                  # seance-<pane-uuid>` — persistent sessions
                                  # per terminal that survive seance restarts
                                  # (re-attached on next launch). Requires the
-                                 # zmx binary on PATH.
-# zmx-kill-on-terminal-close = true  # closing a split/panel-tab/workspace
-                                 # kills its session (off: detach only).
-# zmx-kill-on-window-close = false   # closing a window kills its sessions
-                                 # (off = a window close behaves like quit:
-                                 # sessions survive). Whole-app quit NEVER
-                                 # kills. Mirror keybinds flip the policy
-                                 # per-use: zmx_close_tab (Ctrl+Shift+Alt+W),
+                                 # zmx binary on PATH. Closing a pane/tab/
+                                 # window KEEPS its sessions detached and
+                                 # records the close for undo (separate
+                                 # close-history file, never session.json);
+                                 # quitting kills nothing.
+                                 # Kill-close shortcuts flip that per use:
+                                 # zmx_close_pane (Ctrl+Shift+Alt+X),
+                                 # zmx_close_tab (Ctrl+Shift+Alt+W),
                                  # zmx_close_window (Ctrl+Shift+Alt+Q).
+                                 # zmx_undo_close (Ctrl+Shift+Z) reopens the
+                                 # last closed tab/pane/window (reverse
+                                 # order) and re-attaches its still-alive
+                                 # sessions; zmx_kill_unattached (Ctrl+Alt+K)
+                                 # sweeps all detached seance-* sessions.
 
 [notifications]
 # sound = "default"              # "default", "none", or path to .wav/.ogg file

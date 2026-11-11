@@ -5,12 +5,12 @@
 //! Tabs additionally own a UUID used as the grouping id in session labels.
 //!
 //! Kill policy (when [behavior] zmx-attach = true):
-//!   - explicit terminal close (pane, stacked tab, workspace) → kill its
-//!     session unless zmx-kill-on-terminal-close = false
-//!   - window closed → kill its sessions only if zmx-kill-on-window-close
-//!     (default false: window close behaves like quit)
+//!   - explicit closes (pane, stacked tab, workspace, window) KEEP the
+//!     session: it detaches and a revive snapshot lands in the close
+//!     history (close_history.zig) for the undo keybind.
+//!   - the zmx_* close keybinds (pane/tab/window) kill sessions instead.
+//!   - zmx_kill_unattached kills every clients=0 `seance-*` session.
 //!   - WHOLE-APP quit → kill NOTHING (sessions survive for re-attach)
-//!   - zmx_close_tab / zmx_close_window keybinds flip the policy per use
 
 const std = @import("std");
 const uuid = @import("uuid.zig");
@@ -40,6 +40,81 @@ fn isValidUuidToken(tok: []const u8) bool {
         if (!std.ascii.isHex(ch) and ch != '-') return false;
     }
     return true;
+}
+
+/// zmx keeps one unix socket per session under `$XDG_RUNTIME_DIR/zmx/`.
+pub const runtime_dir_name = "zmx";
+
+/// Fast synchronous liveness hint: does the daemon socket for this pane's
+/// session exist? (The authoritative answer — including client counts and
+/// stale sockets — comes from parsing `zmx list` output.)
+pub fn socketExists(runtime_dir: []const u8, pane_uuid: []const u8) bool {
+    const io_mod = @import("io.zig");
+    if (pane_uuid.len != uuid.len or !isValidUuidToken(pane_uuid)) return false;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(
+        &path_buf,
+        "{s}/{s}/{s}{s}",
+        .{ runtime_dir, runtime_dir_name, session_prefix, pane_uuid },
+    ) catch return false;
+    std.Io.Dir.accessAbsolute(io_mod.get(), path, .{}) catch return false;
+    return true;
+}
+
+pub const SessionRow = struct {
+    pane_uuid: [uuid.len]u8,
+    clients: u32,
+};
+
+/// Parse `zmx list` output: tab-separated kv lines such as
+/// `  name=seance-<uuid>\tpid=1\tclients=0\t...`. Only rows whose name is
+/// exactly `seance-<valid uuid>` are collected — the sweep must never
+/// touch sessions seance did not spawn.
+pub fn parseListSessions(alloc: std.mem.Allocator, output: []const u8) !std.ArrayList(SessionRow) {
+    var rows: std.ArrayList(SessionRow) = .empty;
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (line.len == 0) continue;
+        var id: ?[uuid.len]u8 = null;
+        var clients: u32 = 0;
+        var fields = std.mem.splitScalar(u8, line, '\t');
+        while (fields.next()) |field| {
+            if (std.mem.startsWith(u8, field, "name=")) {
+                const val = field["name=".len..];
+                if (std.mem.startsWith(u8, val, session_prefix)) {
+                    const rest = val[session_prefix.len..];
+                    if (isValidUuidToken(rest)) {
+                        var copy: [uuid.len]u8 = undefined;
+                        @memcpy(&copy, rest[0..uuid.len]);
+                        id = copy;
+                    }
+                }
+            } else if (std.mem.startsWith(u8, field, "clients=")) {
+                clients = std.fmt.parseInt(u32, field["clients=".len..], 10) catch 0;
+            }
+        }
+        if (id) |u| try rows.append(alloc, .{ .pane_uuid = u, .clients = clients });
+    }
+    return rows;
+}
+
+/// Space-separated UUIDs of detached (clients=0) sessions from parsed
+/// list rows, fitting into `buf` (truncated on overflow).
+pub fn detachedUuidList(rows: []const SessionRow, buf: []u8) []const u8 {
+    var pos: usize = 0;
+    for (rows) |r| {
+        if (r.clients != 0) continue;
+        const need: usize = (if (pos == 0) @as(usize, 0) else 1) + uuid.len;
+        if (pos + need > buf.len) break;
+        if (pos > 0) {
+            buf[pos] = ' ';
+            pos += 1;
+        }
+        @memcpy(buf[pos..][0..uuid.len], &r.pane_uuid);
+        pos += uuid.len;
+    }
+    return buf[0..pos];
 }
 
 /// Format the valid UUIDs from `list` back into a normalized
@@ -89,4 +164,35 @@ test "normalizeUuidList drops garbage and reflows spaces" {
     try testing.expect(normalizeUuidList(good, &tiny) == null);
     // all-garbage list → empty
     try testing.expectEqualStrings("", normalizeUuidList("nope nope", &buf).?);
+}
+
+test "parseListSessions: real-shape output, seance-only, client counts" {
+    // Fixture mirrors `zmx list` (v0.8.1): indented tab-separated kv lines.
+    const out = "  name=seance-20b9c01d-881f-4a2f-bb75-ac5a3d34ed43\tpid=85292\tclients=0\tcreated=1794347621\tcwd=/home/mika\tcmd=bash --posix\tpane=20b9c01d-881f-4a2f-bb75-ac5a3d34ed43\ttab=b115f8a9" ++
+        "\n  name=scratch\tpid=99\tclients=2" ++
+        "\n  name=seance-42cb94ae-100d-4d0e-9a3c-d36aad7545dd\tpid=178626\tclients=1\tcreated=1794362446\tcwd=/home\tcmd=bash\tpane=42cb94ae" ++
+        "\n  name=seance-not-a-uuid\tpid=1\tclients=0" ++
+        "\ngarbage line without fields\n";
+    const alloc = testing.allocator;
+    var rows = try parseListSessions(alloc, out);
+    defer rows.deinit(alloc);
+    try testing.expectEqual(@as(usize, 2), rows.items.len);
+    try testing.expectEqual(@as(u32, 0), rows.items[0].clients);
+    try testing.expectEqual(@as(u32, 1), rows.items[1].clients);
+
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "20b9c01d-881f-4a2f-bb75-ac5a3d34ed43",
+        detachedUuidList(rows.items, &buf),
+    );
+    // empty list → empty string
+    try testing.expectEqualStrings("", detachedUuidList(&.{}, &buf));
+}
+
+test "socketExists: uuid shape validation without touching the fs" {
+    // Garbage tokens are rejected before any path is built.
+    try testing.expect(!socketExists("/nonexistent-xyz", "nope"));
+    try testing.expect(!socketExists("/nonexistent-xyz", "0f8fad5b-d9cb-469f-a165-70867728950Z"));
+    // A valid uuid against a nonexistent runtime dir is simply not there.
+    try testing.expect(!socketExists("/nonexistent-xyz", "0f8fad5b-d9cb-469f-a165-70867728950e"));
 }
