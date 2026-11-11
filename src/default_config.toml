@@ -41,21 +41,17 @@
 # antigravity-hooks = true       # track Antigravity CLI sessions (new panes)
 # zmx-attach = false             # every terminal pane execs `zmx attach
                                  # seance-<pane-uuid>` — persistent sessions
-                                 # per terminal that survive seance restarts.
-                                 # On every EXPLICIT close (pane/tab/window
-                                 # while others remain) seance runs
-                                 # `zmx kill --force seance-<uuid>` for the
-                                 # terminals going away; whole-app quit keeps
-                                 # sessions alive for the next re-attach.
-
-[hooks]
-# on-tab-open = ""               # shell command on explicit tab creation
-# on-tab-close = ""              # shell command on explicit tab close
-                                 # (not on window quit or app exit; the zmx
-                                 # kill above is built-in, this is for extras);
-                                 # env: SEANCE_HOOK, SEANCE_TAB_UUID,
-                                 # SEANCE_WORKSPACE_ID, SEANCE_TAB_TITLE,
-                                 # SEANCE_PANE_UUIDS (close only)
+                                 # per terminal that survive seance restarts
+                                 # (re-attached on next launch). Requires the
+                                 # zmx binary on PATH.
+# zmx-kill-on-terminal-close = true  # closing a split/panel-tab/workspace
+                                 # kills its session (off: detach only).
+# zmx-kill-on-window-close = false   # closing a window kills its sessions
+                                 # (off = a window close behaves like quit:
+                                 # sessions survive). Whole-app quit NEVER
+                                 # kills. Mirror keybinds flip the policy
+                                 # per-use: zmx_close_tab (Ctrl+Shift+Alt+W),
+                                 # zmx_close_window (Ctrl+Shift+Alt+Q).
 
 [notifications]
 # sound = "default"              # "default", "none", or path to .wav/.ogg file

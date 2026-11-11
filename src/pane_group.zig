@@ -593,7 +593,7 @@ fn killZmxForPanel(panel: Panel) void {
     const pane = panel.asTerminal() orelse return;
     if (pane.pane_uuid[0] == 0) return;
     const Window = @import("window.zig");
-    Window.WindowState.killZmxSessions(pane.pane_uuid[0..]);
+    Window.WindowState.killZmxSessions(pane.pane_uuid[0..], .terminal);
 }
 
 fn onClosePage(_: *c.AdwTabView, page: *c.AdwTabPage, user_data: c.gpointer) callconv(.c) c.gboolean {

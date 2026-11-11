@@ -235,13 +235,6 @@ pub const WindowState = struct {
 
         self.sidebar.refresh();
         self.selectWorkspace(target_idx);
-        self.fireOpenHook(ws);
-    }
-
-    fn fireOpenHook(self: *WindowState, ws: *Workspace) void {
-        _ = self;
-        const cfg = config_mod.get();
-        runTabHook("open", cfg.hook_on_tab_open[0..cfg.hook_on_tab_open_len], ws.tab_uuid, ws.id, ws.getTitle(), null);
     }
 
     /// Environment key/value pair for spawnBash.
@@ -255,7 +248,7 @@ pub const WindowState = struct {
 
         var cmd_buf: [1025:0]u8 = undefined;
         if (cmd.len >= cmd_buf.len) {
-            std.log.warn("hooks: {s} command too long", .{label});
+            std.log.warn("spawn: {s} command too long", .{label});
             return;
         }
         @memcpy(cmd_buf[0..cmd.len], cmd);
@@ -267,45 +260,43 @@ pub const WindowState = struct {
         var argv = [_:null]?[*:0]const u8{ "bash", "-c", &cmd_buf, null };
         const ok = c.g_spawn_async(null, @ptrCast(&argv), envp, c.G_SPAWN_SEARCH_PATH, null, null, null, null);
         c.g_strfreev(envp);
-        if (ok == 0) std.log.warn("hooks: failed to spawn {s} command", .{label});
+        if (ok == 0) std.log.warn("spawn: failed to spawn {s} command", .{label});
     }
 
-    /// Run a [hooks] tab-lifecycle command with identifying env vars.
-    fn runTabHook(hook_name: [*:0]const u8, cmd: []const u8, tab_uuid: [36]u8, ws_id: u64, title: []const u8, pane_uuids: ?[*:0]const u8) void {
-        if (cmd.len == 0) return;
+    /// Which close policy governs a killZmxSessions call.
+    pub const KillCtx = enum {
+        /// terminal/pane/tab close — [behavior] zmx-kill-on-terminal-close
+        terminal,
+        /// window close — [behavior] zmx-kill-on-window-close
+        window,
+    };
 
-        var uuid_z: [37:0]u8 = undefined;
-        @memcpy(uuid_z[0..36], tab_uuid[0..]);
-        uuid_z[36] = 0;
+    /// While set, killZmxSessions uses the OPPOSITE of the configured
+    /// policy for its ctx. Used by the zmx mirror keybinds
+    /// (zmx_close_tab / zmx_close_window): those actions perform the same
+    /// close as their plain counterparts but with the session-kill meaning
+    /// flipped, for the duration of the synchronous close cascade.
+    var zmx_kill_invert = false;
 
-        var title_buf: [129:0]u8 = undefined;
-        const tlen = @min(title.len, 128);
-        @memcpy(title_buf[0..tlen], title[0..tlen]);
-        title_buf[tlen] = 0;
-
-        var wsid_buf: [64]u8 = undefined;
-        const wsid_z: [*:0]const u8 = std.fmt.bufPrintZ(&wsid_buf, "{d}", .{ws_id}) catch return;
-
-        var envs: [5]EnvKv = .{
-            .{ .name = "SEANCE_HOOK", .value = hook_name },
-            .{ .name = "SEANCE_TAB_UUID", .value = &uuid_z },
-            .{ .name = "SEANCE_WORKSPACE_ID", .value = wsid_z },
-            .{ .name = "SEANCE_TAB_TITLE", .value = &title_buf },
-            .{ .name = "SEANCE_PANE_UUIDS", .value = pane_uuids orelse "" },
-        };
-        spawnBash(hook_name, cmd, &envs);
+    pub fn setZmxKillInvert(on: bool) void {
+        zmx_kill_invert = on;
     }
 
     /// Built-in zmx cleanup: kill the zmx sessions of the given terminals
-    /// (space-separated UUID list; corrupt tokens are dropped). Fired on
-    /// every EXPLICIT terminal close — pane removed, tab closed, window
-    /// closed while the app keeps running — when [behavior] zmx-attach is
-    /// on. NEVER on whole-app quit: sessions survive so the next seance
-    /// launch re-attaches to them.
-    pub fn killZmxSessions(uuids: []const u8) void {
+    /// (space-separated UUID list; corrupt tokens are dropped) if the
+    /// policy for `ctx` says so — master switch [behavior] zmx-attach,
+    /// then the per-target kill flag (inverted while zmx_kill_invert is
+    /// set). Whole-app quit never routes through here: sessions survive a
+    /// quit so the next seance launch re-attaches to them.
+    pub fn killZmxSessions(uuids: []const u8, ctx: KillCtx) void {
         const zmx_mod = @import("zmx.zig");
         const cfg = config_mod.get();
         if (!cfg.zmx_attach) return;
+        const policy = switch (ctx) {
+            .terminal => cfg.zmx_kill_on_terminal_close,
+            .window => cfg.zmx_kill_on_window_close,
+        };
+        if (!(if (zmx_kill_invert) !policy else policy)) return;
         if (uuids.len == 0) return;
 
         var norm_buf: [16384]u8 = undefined;
@@ -321,7 +312,7 @@ pub const WindowState = struct {
     }
 
     /// Kill every terminal session belonging to a window that is being
-    /// closed while other windows remain (called by WindowManager.closeWindow).
+    /// closed (called by WindowManager.closeWindow; policy-gated).
     pub fn killZmxSessionsOfWindow(win: *WindowState) void {
         var buf: [16384]u8 = undefined;
         var pos: usize = 0;
@@ -333,23 +324,36 @@ pub const WindowState = struct {
                 pos += 1;
             }
         }
-        killZmxSessions(buf[0..pos]);
+        killZmxSessions(buf[0..pos], .window);
+    }
+
+    /// Mirror of ctrl+shift-w (close tab in focused group + cascade) with
+    /// the zmx session-kill meaning flipped for this operation.
+    pub fn zmxCloseTabFocused(self: *WindowState) void {
+        setZmxKillInvert(true);
+        defer setZmxKillInvert(false);
+        if (self.activeWorkspace()) |ws| {
+            const ws_empty = ws.closeTabInFocusedGroup();
+            if (ws_empty) self.closeWorkspace(self.active_workspace);
+        }
+    }
+
+    /// Mirror of the window close button / Alt+F4 with the zmx
+    /// session-kill meaning flipped. Bypasses the close confirmation
+    /// (the key itself is the explicit intent). The pre-emptive kill makes
+    /// the LAST-window case (whole-app quit, which otherwise never kills)
+    /// flip to "kill" too.
+    pub fn zmxCloseWindow(self: *WindowState) void {
+        setZmxKillInvert(true);
+        defer setZmxKillInvert(false);
+        killZmxSessionsOfWindow(self);
+        self.window_manager.closeWindow(self);
     }
 
     pub fn closeWorkspace(self: *WindowState, index: usize) void {
         if (index >= self.workspaces.items.len) return;
         const ws = self.workspaces.items[index];
 
-        // Capture hook payload before teardown frees the workspace.
-        const hook_ws_id = ws.id;
-        const hook_tab_uuid = ws.tab_uuid;
-        var hook_title_buf: [128]u8 = undefined;
-        const hook_title = blk: {
-            const t = ws.getTitle();
-            const n = @min(t.len, hook_title_buf.len);
-            @memcpy(hook_title_buf[0..n], t[0..n]);
-            break :blk hook_title_buf[0..n];
-        };
         // Collect pane UUIDs space-separated; nul-terminate IN PLACE (a
         // bufPrintZ from pu_buf into itself would alias and panic).
         var pu_buf: [4096:0]u8 = undefined;
@@ -393,11 +397,8 @@ pub const WindowState = struct {
             self.sidebar.setActive(self.active_workspace);
         }
 
-        const cfg = config_mod.get();
-        // Explicit tab close: kill every terminal session this tab owned,
-        // then run the user-configured hook (if any).
-        killZmxSessions(pu);
-        runTabHook("close", cfg.hook_on_tab_close[0..cfg.hook_on_tab_close_len], hook_tab_uuid, hook_ws_id, hook_title, &pu_buf);
+        // Explicit tab close: kill every terminal session this tab owned.
+        killZmxSessions(pu, .terminal);
     }
 
     /// Detach a workspace from this window without destroying it.
@@ -506,7 +507,7 @@ pub const WindowState = struct {
         // zmx kill --force is idempotent, so overlap with a cascade kill
         // below is harmless.
         if (closed_uuid) |u| {
-            if (u[0] != 0) killZmxSessions(u[0..]);
+            if (u[0] != 0) killZmxSessions(u[0..], .terminal);
         }
         if (ws_empty) {
             self.closeWorkspace(self.active_workspace);
@@ -550,7 +551,7 @@ pub const WindowState = struct {
             for (grp.panels.items) |panel| {
                 const tp = panel.asTerminal() orelse continue;
                 if (tp.id == pane_id) {
-                    killZmxSessions(tp.pane_uuid[0..]);
+                    killZmxSessions(tp.pane_uuid[0..], .terminal);
                     break;
                 }
             }
@@ -1297,7 +1298,6 @@ pub const WindowState = struct {
 
         self.sidebar.refresh();
         self.selectWorkspace(target_idx);
-        self.fireOpenHook(ws);
     }
 
     /// Build the CSD chrome: adw header bar with add/notif/hide/settings

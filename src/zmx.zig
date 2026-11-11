@@ -2,14 +2,15 @@
 //!
 //! Session naming: each terminal (Pane) mints a UUID (uuid.zig) that is
 //! persisted in session.json; its zmx session is "seance-<pane-uuid>".
-//! Tabs additionally own a UUID used only as the grouping id for lifecycle
-//! hooks and session labels.
+//! Tabs additionally own a UUID used as the grouping id in session labels.
 //!
 //! Kill policy (when [behavior] zmx-attach = true):
-//!   - explicit terminal close (pane removed, tab closed, split closed)
-//!     → kill that terminal's session
-//!   - window closed while other windows remain → kill all its panes
+//!   - explicit terminal close (pane, stacked tab, workspace) → kill its
+//!     session unless zmx-kill-on-terminal-close = false
+//!   - window closed → kill its sessions only if zmx-kill-on-window-close
+//!     (default false: window close behaves like quit)
 //!   - WHOLE-APP quit → kill NOTHING (sessions survive for re-attach)
+//!   - zmx_close_tab / zmx_close_window keybinds flip the policy per use
 
 const std = @import("std");
 const uuid = @import("uuid.zig");

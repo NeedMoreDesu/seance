@@ -329,8 +329,7 @@ pub const Workspace = struct {
     }
 
     /// Space-separated pane UUIDs of every terminal in this workspace
-    /// (columns → groups → panels). Used for zmx session kills and the
-    /// on-tab-close hook's SEANCE_PANE_UUIDS env.
+    /// (columns → groups → panels). Used for zmx session kills.
     pub fn collectPaneUuids(self: *Workspace, buf: []u8) []const u8 {
         var pos: usize = 0;
         for (self.columns.items) |*col| {
@@ -2237,7 +2236,7 @@ pub const Workspace = struct {
         if (doomed_uuid) |u| {
             if (u[0] != 0) {
                 const Window = @import("window.zig");
-                Window.WindowState.killZmxSessions(u[0..]);
+                Window.WindowState.killZmxSessions(u[0..], .terminal);
             }
         }
         if (empty) {

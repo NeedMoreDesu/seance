@@ -9,6 +9,10 @@ var gpa = std.heap.DebugAllocator(.{}){};
 pub const WindowManager = struct {
     allocator: std.mem.Allocator,
     windows: std.ArrayList(*Window.WindowState),
+    /// JSON snapshots of windows closed under the zmx "keep sessions on
+    /// window close" policy (detach semantics): they stay in session.json
+    /// so the next launch re-creates them and re-attaches their sessions.
+    parked_windows: std.ArrayList([]u8) = .empty,
     active_window: ?*Window.WindowState = null,
     app: *c.GtkApplication,
     autosave_timer: c.guint = 0,
@@ -100,10 +104,27 @@ pub const WindowManager = struct {
 
         // Other windows still open — safe to clean up ghostty surfaces
         // since the main loop is still running for the remaining windows.
-        // Explicit window close: kill this window's terminal sessions
-        // first (the whole-app quit path above deliberately does NOT —
-        // sessions must survive so the next seance re-attaches).
+        // Window close routes through the kill policy
+        // ([behavior] zmx-kill-on-window-close, default OFF — the whole-app
+        // quit path above also keeps sessions, so the next seance launch
+        // re-attaches to them).
         Window.WindowState.killZmxSessionsOfWindow(win);
+
+        // Detach semantics: with zmx on and window-kill off, the closed
+        // window is PARKED (full snapshot incl. scrollback) into the
+        // session file instead of being pruned — "close window" then just
+        // means "not showing right now", symmetric with app quit. With
+        // kills enabled (or zmx off), closing prunes as before.
+        {
+            const cfg = @import("config.zig").get();
+            const park = cfg.zmx_attach and !cfg.zmx_kill_on_window_close and
+                !is_last_window and !is_shutdown;
+            if (park) {
+                if (session.captureWindowJson(self.allocator, win, true)) |snap| {
+                    self.parked_windows.append(self.allocator, snap) catch {};
+                }
+            }
+        }
 
         for (win.workspaces.items) |ws| {
             ws.destroy();

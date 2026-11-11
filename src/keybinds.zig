@@ -22,6 +22,7 @@ pub const Action = enum(u8) {
     // Tabs
     new_tab,
     close_tab,
+    zmx_close_tab,
     next_tab,
     prev_tab,
     tab_1,
@@ -75,6 +76,7 @@ pub const Action = enum(u8) {
     new_window,
     toggle_fullscreen,
     quit_app,
+    zmx_close_window,
 
     // Command palette
     open_command_palette,
@@ -210,6 +212,7 @@ fn initDefaults() void {
     // Tabs
     set(.new_tab, .{ .key = c.GDK_KEY_T, .ctrl = true, .shift = true });
     set(.close_tab, .{ .key = c.GDK_KEY_W, .ctrl = true, .shift = true });
+    set(.zmx_close_tab, .{ .key = c.GDK_KEY_W, .ctrl = true, .shift = true, .alt = true });
     set(.next_tab, .{ .key = c.GDK_KEY_Tab, .ctrl = true });
     set(.prev_tab, .{ .key = c.GDK_KEY_Tab, .ctrl = true, .shift = true });
     set(.tab_1, .{ .key = c.GDK_KEY_1, .ctrl = true });
@@ -263,6 +266,7 @@ fn initDefaults() void {
     set(.new_window, .{ .key = c.GDK_KEY_N, .ctrl = true, .shift = true });
     set(.toggle_fullscreen, .{ .key = c.GDK_KEY_F11 });
     set(.quit_app, .{ .key = c.GDK_KEY_Q, .ctrl = true, .shift = true });
+    set(.zmx_close_window, .{ .key = c.GDK_KEY_Q, .ctrl = true, .shift = true, .alt = true });
 
     // Command palette
     set(.open_command_palette, .{ .key = c.GDK_KEY_P, .ctrl = true, .shift = true });
@@ -452,6 +456,7 @@ pub fn executeAction(action: Action, state: *Window.WindowState) c.gboolean {
                 if (ws_empty) state.closeWorkspace(state.active_workspace);
             }
         },
+        .zmx_close_tab => state.zmxCloseTabFocused(),
         .next_tab => {
             if (state.activeWorkspace()) |ws| ws.nextTabInFocusedGroup();
         },
@@ -551,6 +556,7 @@ pub fn executeAction(action: Action, state: *Window.WindowState) c.gboolean {
         },
         .toggle_fullscreen => state.toggleFullscreen(),
         .quit_app => state.quitApp(),
+        .zmx_close_window => state.zmxCloseWindow(),
 
         // Command palette
         .open_command_palette => state.toggleCommandPalette(),

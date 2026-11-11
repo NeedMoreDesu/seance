@@ -75,12 +75,28 @@ fn writeMultiWindowJson(buf: *std.ArrayList(u8), alloc: Allocator, wm: anytype, 
     try writeKvInt(w, "created_at", @intCast(io.timestamp()), false);
     try w.writeAll(",\"windows\":[");
 
+    var wrote = wm.windows.items.len;
     for (wm.windows.items, 0..) |state, i| {
         if (i > 0) try w.writeByte(',');
         try writeWindowJson(w, state, include_scrollback);
     }
+    // Windows closed under the keep-on-window-close policy are parked as
+    // raw JSON snapshots and re-emitted so the next launch restores them.
+    for (wm.parked_windows.items) |snap| {
+        if (wrote > 0) try w.writeByte(',');
+        try w.writeAll(snap);
+        wrote += 1;
+    }
 
     try w.writeAll("]}");
+}
+
+/// Serialize one window to an owned JSON object string (for parking).
+pub fn captureWindowJson(alloc: Allocator, state: anytype, include_scrollback: bool) ?[]u8 {
+    var output: std.Io.Writer.Allocating = .init(alloc);
+    defer output.deinit();
+    writeWindowJson(&output.writer, state, include_scrollback) catch return null;
+    return output.toOwnedSlice() catch null;
 }
 
 fn writeWindowJson(w: anytype, state: anytype, include_scrollback: bool) !void {

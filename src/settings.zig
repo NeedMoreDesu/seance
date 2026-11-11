@@ -44,6 +44,9 @@ const Widgets = struct {
     pi_hooks: ?*c.GtkWidget = null,
     opencode_hooks: ?*c.GtkWidget = null,
     antigravity_hooks: ?*c.GtkWidget = null,
+    zmx_attach: ?*c.GtkWidget = null,
+    zmx_kill_on_terminal_close: ?*c.GtkWidget = null,
+    zmx_kill_on_window_close: ?*c.GtkWidget = null,
 
     // Combos
     notification_sound: ?*c.GtkWidget = null,
@@ -451,6 +454,20 @@ fn buildIntegrationsSection(page: *c.GtkWidget, cfg: *const config_mod.Config) v
     w.port_base = addSpinRow(g3, "Port Base", "Starting port for SEANCE_PORT env var.", 1024, 65535, 1, @floatFromInt(cfg.port_base));
     w.port_range = addSpinRow(g3, "Port Range Size", "Number of ports per workspace.", 1, 100, 1, @floatFromInt(cfg.port_range));
     addToPage(page, g3);
+
+    // Card 4: zmx session persistence
+    const g4 = newGroup("zmx");
+    c.adw_preferences_group_set_description(@as(*c.AdwPreferencesGroup, @ptrCast(g4)), "zmx keeps each terminal alive in its own session that survives seance restarts (re-attached on next launch). Requires the zmx binary. Changes apply to new panes; sessions of closed terminals follow the kill policy below.");
+    w.zmx_attach = addSwitchRow(g4, "Use zmx sessions", "Every terminal pane runs inside a persistent zmx session named by its UUID.", cfg.zmx_attach);
+    w.zmx_kill_on_terminal_close = addSwitchRow(g4, "Close terminal kills session", "Closing a split, panel tab, or workspace kills its session. Off: it detaches and the session lives until quit.", cfg.zmx_kill_on_terminal_close);
+    w.zmx_kill_on_window_close = addSwitchRow(g4, "Close window kills sessions", "Off by default: closing a window behaves like quitting — sessions survive and re-attach on the next launch.", cfg.zmx_kill_on_window_close);
+    setZmxRowsVisible(cfg.zmx_attach);
+    addToPage(page, g4);
+}
+
+fn setZmxRowsVisible(enabled: bool) void {
+    if (w.zmx_kill_on_terminal_close) |r| c.gtk_widget_set_visible(r, if (enabled) 1 else 0);
+    if (w.zmx_kill_on_window_close) |r| c.gtk_widget_set_visible(r, if (enabled) 1 else 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +497,7 @@ const shortcut_defs = [_]ShortcutDef{
     .{ .action = .workspace_9, .label = "Workspace 9" },
     .{ .action = .new_tab, .label = "New Tab" },
     .{ .action = .close_tab, .label = "Close Tab" },
+    .{ .action = .zmx_close_tab, .label = "Close Tab (zmx: toggle session kill)" },
     .{ .action = .next_tab, .label = "Next Tab" },
     .{ .action = .prev_tab, .label = "Previous Tab" },
     .{ .action = .tab_1, .label = "Tab 1" },
@@ -513,6 +531,7 @@ const shortcut_defs = [_]ShortcutDef{
     .{ .action = .rename_workspace, .label = "Rename Workspace" },
     .{ .action = .toggle_pin, .label = "Toggle Pin" },
     .{ .action = .new_window, .label = "New Window" },
+    .{ .action = .zmx_close_window, .label = "Close Window (zmx: toggle session kill)" },
     .{ .action = .open_command_palette, .label = "Command Palette" },
     .{ .action = .open_folder, .label = "Open Folder" },
     .{ .action = .reload_config, .label = "Reload Config" },
@@ -700,6 +719,13 @@ fn onSwitchChanged(obj: *c.GObject, _: *c.GParamSpec, _: c.gpointer) callconv(.c
         cfg.opencode_hooks = active;
     } else if (widget == w.antigravity_hooks) {
         cfg.antigravity_hooks = active;
+    } else if (widget == w.zmx_attach) {
+        cfg.zmx_attach = active;
+        setZmxRowsVisible(active);
+    } else if (widget == w.zmx_kill_on_terminal_close) {
+        cfg.zmx_kill_on_terminal_close = active;
+    } else if (widget == w.zmx_kill_on_window_close) {
+        cfg.zmx_kill_on_window_close = active;
     } else return;
 
     saveAndReload();
