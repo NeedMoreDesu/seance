@@ -471,7 +471,6 @@ fn buildIntegrationsSection(page: *c.GtkWidget, cfg: *const config_mod.Config) v
 const zmx_shortcut_defs = [_]ShortcutDef{
     .{ .action = .zmx_close_pane, .label = "Close Pane (zmx: kill session)" },
     .{ .action = .zmx_close_tab, .label = "Close Tab (zmx: kill session)" },
-    .{ .action = .zmx_close_window, .label = "Close Window (zmx: kill session)" },
     .{ .action = .zmx_undo_close, .label = "Undo Tab Close (zmx)" },
     .{ .action = .zmx_kill_unattached, .label = "Kill Unattached zmx Sessions" },
 };

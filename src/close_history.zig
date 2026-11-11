@@ -634,8 +634,10 @@ pub fn triggerScan() void {
     requestScan(false);
 }
 
-/// Kill every detached (`clients=0`) `seance-*` session. Sessions not
-/// spawned by seance (any other name) are never touched.
+/// Kill every detached (`clients=0`) `seance-*` session, except those
+/// belonging to panes that are open right now (their shells may simply
+/// not have been spawned yet — restored workspaces attach lazily).
+/// Sessions not spawned by seance (any other name) are never touched.
 pub fn killUnattached() void {
     requestScan(true);
 }
@@ -713,13 +715,16 @@ fn onScanIdle(data: c.gpointer) callconv(.c) c.gboolean {
     // Everything else in the history is dead memory — drop it.
     if (prune(rows.items)) save();
 
+    // Sessions of panes that are OPEN right now must never count or die:
+    // restored workspaces only spawn a shell when first shown, so their
+    // sessions sit at clients=0 legitimately. The sweep targets detached
+    // orphans only.
+    var owned = livePaneUuids(a);
+    defer owned.deinit(a);
+
     var det_buf: [16384]u8 = undefined;
-    const detached = zmx.detachedUuidList(rows.items, &det_buf);
-    var n: usize = 0;
-    for (rows.items) |r| {
-        if (r.clients == 0) n += 1;
-    }
-    detached_count = n;
+    const detached = zmx.detachedUuidList(rows.items, owned.items, &det_buf);
+    detached_count = zmx.detachedCount(rows.items, owned.items);
     updateSidebars();
 
     if (work.sweep and detached.len > 0) {
@@ -728,6 +733,29 @@ fn onScanIdle(data: c.gpointer) callconv(.c) c.gboolean {
         requestScan(false);
     }
     return 0;
+}
+
+/// UUIDs of every terminal pane currently alive in the window tree.
+fn livePaneUuids(a: Allocator) std.ArrayList([uuid.len]u8) {
+    var list: std.ArrayList([uuid.len]u8) = .empty;
+    const Window = @import("window.zig");
+    const wm = Window.window_manager orelse return list;
+    for (wm.windows.items) |st| {
+        if (st.destroyed) continue;
+        for (st.workspaces.items) |ws| {
+            for (ws.columns.items) |col| {
+                if (col.closing) continue;
+                for (col.groups.items) |grp| {
+                    for (grp.panels.items) |panel| {
+                        const tp = panel.asTerminal() orelse continue;
+                        if (tp.pane_uuid[0] == 0) continue;
+                        list.append(a, tp.pane_uuid) catch return list;
+                    }
+                }
+            }
+        }
+    }
+    return list;
 }
 
 fn updateSidebars() void {

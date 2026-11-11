@@ -97,10 +97,12 @@ pub const Sidebar = struct {
         c.gtk_box_append(@ptrCast(vbox), tab_bar.widget);
 
         // Unattached-zmx indicator: sits at the bottom (the tab bar above
-        // it expands), i.e. directly above the footer built later.
+        // it expands), i.e. directly above the footer built later. The CSS
+        // class gives it the same thin top separator + padding the footer
+        // uses below it.
         const zmx_label = c.gtk_label_new("");
-        c.gtk_widget_add_css_class(zmx_label, "dim-label");
-        c.gtk_label_set_xalign(@ptrCast(zmx_label), 0.0);
+        c.gtk_widget_add_css_class(zmx_label, "sidebar-zmx-status");
+        c.gtk_label_set_xalign(@ptrCast(zmx_label), 0.5);
         c.gtk_widget_set_visible(zmx_label, 0);
         c.gtk_box_append(@ptrCast(vbox), zmx_label);
 

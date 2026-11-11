@@ -271,9 +271,10 @@ pub const WindowState = struct {
     }
 
     /// Set for the duration of a zmx kill-close cascade (zmx_close_pane /
-    /// zmx_close_tab / zmx_close_window, or a socket close with
-    /// zmx_kill=true): the close paths in scope then DESTROY the sessions
-    /// they close, instead of the default keep + record-history.
+    /// zmx_close_tab, or a socket close with zmx_kill=true): the close
+    /// paths in scope then DESTROY the sessions they close, instead of
+    /// the default keep + record-history. Window closes never enter kill
+    /// mode (no zmx window-close mirror: cleanup is the sweep's job).
     var zmx_kill_mode = false;
 
     pub fn setZmxKillMode(on: bool) void {
@@ -307,7 +308,11 @@ pub const WindowState = struct {
         spawnBash("zmx-kill", zmx_mod.kill_cmd_env, &envs);
     }
 
-    /// Space-separated UUIDs of every terminal session in a window.
+    /// Space-separated UUIDs of every terminal session in a window
+    /// (close-history session list). There is deliberately NO window-close
+    /// kill variant: closing windows always detaches + records, and
+    /// orphan cleanup is the kill-unattached sweep's job
+    /// (zmx_kill_unattached).
     pub fn collectZmxUuidsOfWindow(win: *WindowState, buf: []u8) []const u8 {
         var pos: usize = 0;
         for (win.workspaces.items) |ws| {
@@ -319,11 +324,6 @@ pub const WindowState = struct {
             }
         }
         return buf[0..pos];
-    }
-
-    pub fn killZmxSessionsOfWindow(win: *WindowState) void {
-        var buf: [16384]u8 = undefined;
-        killZmxSessions(collectZmxUuidsOfWindow(win, &buf));
     }
 
     /// The single close chokepoint every explicit close path funnels
@@ -480,18 +480,6 @@ pub const WindowState = struct {
         self.closeFocusedPane();
     }
 
-    /// Kill twin of the window close button / Alt+F4. Bypasses the close
-    /// confirmation (the key itself is the explicit intent). The
-    /// pre-emptive kill covers the LAST-window case too: that path quits
-    /// before closeWindow reaches its per-window handling, and quitting
-    /// never kills — here the intent is a hard quit.
-    pub fn zmxCloseWindow(self: *WindowState) void {
-        zmx_kill_mode = true;
-        defer zmx_kill_mode = false;
-        killZmxSessionsOfWindow(self);
-        self.window_manager.closeWindow(self);
-    }
-
     /// "Undo Tab Close (zmx)": revive the most recently closed item
     /// (pane, tab or window) from the close history, in reverse order of
     /// closing. Its shells re-attach to the still-alive zmx sessions.
@@ -500,9 +488,12 @@ pub const WindowState = struct {
         _ = close_history.undoLast();
     }
 
-    /// "Kill Unattached zmx Sessions": sweep every detached (clients=0)
-    /// session whose name starts with the seance- prefix. Foreign zmx
-    /// sessions are never touched.
+    /// "Kill Unattached zmx Sessions" (Ctrl+Shift+Alt+K, joining the
+    /// kill-close family): sweep every detached (clients=0) session whose
+    /// name starts with the seance- prefix. Foreign zmx sessions are never
+    /// touched — and sessions of panes that are currently OPEN are
+    /// excluded too (restored workspaces spawn their shell lazily, so
+    /// those sit detached until first shown).
     pub fn zmxKillUnattached(_: *WindowState) void {
         if (!config_mod.get().zmx_attach) return;
         close_history.killUnattached();
@@ -2727,6 +2718,7 @@ fn loadThemeCss() void {
         \\.sidebar-ws-ports {{ font-size: 10px; opacity: 0.8; }}
         \\.sidebar-progress trough {{ min-height: 3px; border-radius: 1.5px; background-color: alpha(@window_fg_color, 0.2); }}
         \\.sidebar-progress progress {{ min-height: 3px; border-radius: 1.5px; background-color: {s}; }}
+        \\.sidebar-zmx-status {{ padding: 4px 6px; border-top: 1px solid alpha(@window_fg_color, 0.15); font-size: 10px; opacity: 0.8; }}
         \\.sidebar-footer {{ padding: 4px 6px; border-top: 1px solid alpha(@window_fg_color, 0.15); }}
         \\.sidebar-footer button {{ min-width: 28px; min-height: 28px; padding: 4px; border-radius: 6px; }}
         \\
@@ -2755,6 +2747,7 @@ fn loadThemeCss() void {
     w.print(
         \\.sidebar:backdrop .vtab-bar {{ filter: opacity(0.5); transition: filter 200ms ease-in-out; }}
         \\.sidebar:backdrop .sidebar-footer {{ filter: opacity(0.5); transition: filter 200ms ease-in-out; }}
+        \\.sidebar:backdrop .sidebar-zmx-status {{ filter: opacity(0.5); transition: filter 200ms ease-in-out; }}
         \\
     , .{}) catch return;
 

@@ -100,17 +100,15 @@ pub const WindowManager = struct {
 
         // Other windows still open — safe to clean up ghostty surfaces
         // since the main loop is still running for the remaining windows.
-        // Window close under the zmx feature: the plain close keeps the
-        // window's sessions alive (detach, like quitting) and records the
-        // full window snapshot in the CLOSE HISTORY — a separate file,
-        // never session.json — so one undo can revive the window into
-        // this run. Kill mode (zmx_close_window / socket zmx_kill)
-        // destroys the sessions instead and records nothing. A closed
-        // window is pruned from session.json either way; whole-app quit
-        // never reaches this branch.
-        if (Window.WindowState.zmxKillMode()) {
-            Window.WindowState.killZmxSessionsOfWindow(win);
-        } else {
+        // Window close under the zmx feature ALWAYS keeps the window's
+        // sessions alive (detach, like quitting) and records the full
+        // window snapshot in the CLOSE HISTORY — a separate file, never
+        // session.json — so one undo can revive the window into this
+        // run. There is no kill-close variant for windows by design:
+        // destroying orphans is the kill-unattached sweep's job. A closed
+        // window is pruned from session.json; whole-app quit never
+        // reaches this branch.
+        {
             const cfg = @import("config.zig").get();
             if (cfg.zmx_attach) {
                 var uuid_buf: [16384]u8 = undefined;

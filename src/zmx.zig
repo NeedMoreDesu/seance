@@ -8,8 +8,10 @@
 //!   - explicit closes (pane, stacked tab, workspace, window) KEEP the
 //!     session: it detaches and a revive snapshot lands in the close
 //!     history (close_history.zig) for the undo keybind.
-//!   - the zmx_* close keybinds (pane/tab/window) kill sessions instead.
-//!   - zmx_kill_unattached kills every clients=0 `seance-*` session.
+//!   - the zmx_* close keybinds (pane/tab) kill sessions instead; window
+//!     close has no kill variant (cleanup = zmx_kill_unattached)
+//!   - zmx_kill_unattached kills every clients=0 `seance-*` session not
+//!     owned by a currently-open pane
 //!   - WHOLE-APP quit → kill NOTHING (sessions survive for re-attach)
 
 const std = @import("std");
@@ -100,11 +102,15 @@ pub fn parseListSessions(alloc: std.mem.Allocator, output: []const u8) !std.Arra
 }
 
 /// Space-separated UUIDs of detached (clients=0) sessions from parsed
-/// list rows, fitting into `buf` (truncated on overflow).
-pub fn detachedUuidList(rows: []const SessionRow, buf: []u8) []const u8 {
+/// list rows, fitting into `buf` (truncated on overflow). `owned` holds
+/// the UUIDs of terminals still OPEN in this app: their sessions can be
+/// legitimately detached (restored workspaces only spawn their shell
+/// when first shown) and must never be counted or swept.
+pub fn detachedUuidList(rows: []const SessionRow, owned: []const [uuid.len]u8, buf: []u8) []const u8 {
     var pos: usize = 0;
     for (rows) |r| {
         if (r.clients != 0) continue;
+        if (isOwned(&r.pane_uuid, owned)) continue;
         const need: usize = (if (pos == 0) @as(usize, 0) else 1) + uuid.len;
         if (pos + need > buf.len) break;
         if (pos > 0) {
@@ -115,6 +121,24 @@ pub fn detachedUuidList(rows: []const SessionRow, buf: []u8) []const u8 {
         pos += uuid.len;
     }
     return buf[0..pos];
+}
+
+/// Count of detached, not-otherwise-owned sessions (sidebar indicator).
+pub fn detachedCount(rows: []const SessionRow, owned: []const [uuid.len]u8) usize {
+    var n: usize = 0;
+    for (rows) |r| {
+        if (r.clients != 0) continue;
+        if (isOwned(&r.pane_uuid, owned)) continue;
+        n += 1;
+    }
+    return n;
+}
+
+fn isOwned(id: *const [uuid.len]u8, owned: []const [uuid.len]u8) bool {
+    for (owned) |o| {
+        if (std.mem.eql(u8, o[0..], id[0..])) return true;
+    }
+    return false;
 }
 
 /// Format the valid UUIDs from `list` back into a normalized
@@ -180,13 +204,25 @@ test "parseListSessions: real-shape output, seance-only, client counts" {
     try testing.expectEqual(@as(u32, 0), rows.items[0].clients);
     try testing.expectEqual(@as(u32, 1), rows.items[1].clients);
 
+    var owned: [1][uuid.len]u8 = undefined;
+    @memcpy(&owned[0], "20b9c01d-881f-4a2f-bb75-ac5a3d34ed43");
     var buf: [256]u8 = undefined;
+    // The first row's uuid is OWNED (live pane whose shell has not spawned
+    // yet): excluded from both the kill list and the count.
+    try testing.expectEqualStrings(
+        "",
+        detachedUuidList(rows.items, owned[0..], &buf),
+    );
+    try testing.expectEqual(@as(usize, 0), detachedCount(rows.items, owned[0..]));
+    const none: [0][uuid.len]u8 = .{};
     try testing.expectEqualStrings(
         "20b9c01d-881f-4a2f-bb75-ac5a3d34ed43",
-        detachedUuidList(rows.items, &buf),
+        detachedUuidList(rows.items, none[0..], &buf),
     );
+    try testing.expectEqual(@as(usize, 1), detachedCount(rows.items, none[0..]));
     // empty list → empty string
-    try testing.expectEqualStrings("", detachedUuidList(&.{}, &buf));
+    try testing.expectEqualStrings("", detachedUuidList(&.{}, none[0..], &buf));
+    try testing.expectEqual(@as(usize, 0), detachedCount(&.{}, none[0..]));
 }
 
 test "socketExists: uuid shape validation without touching the fs" {

@@ -715,21 +715,15 @@ pub const SocketServer = struct {
     }
 
     fn handleWindowClose(params: ?std.json.Value, id: []const u8, buf: []u8) []const u8 {
-        const Window = @import("window.zig");
         const wm = getWindowManager() orelse return writeJsonError(buf, id, "not_ready", "Window manager not initialized");
-        const kill = getParamBool(params, "zmx_kill") orelse false;
         const win_idx = getParamInt(params, "window_id") orelse {
             // Close active window
             const state = wm.active_window orelse return writeJsonError(buf, id, "no_window", "No active window");
-            if (kill) Window.WindowState.setZmxKillMode(true);
-            defer if (kill) Window.WindowState.setZmxKillMode(false);
             c.gtk_window_close(@ptrCast(state.gtk_window));
             return writeJsonOk(buf, id, "{}");
         };
         if (win_idx >= wm.windows.items.len) return writeJsonError(buf, id, "not_found", "Window not found");
         const state = wm.windows.items[win_idx];
-        if (kill) Window.WindowState.setZmxKillMode(true);
-        defer if (kill) Window.WindowState.setZmxKillMode(false);
         c.gtk_window_close(@ptrCast(state.gtk_window));
         return writeJsonOk(buf, id, "{}");
     }

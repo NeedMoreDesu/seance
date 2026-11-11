@@ -50,13 +50,17 @@
                                  # quitting kills nothing.
                                  # Kill-close shortcuts flip that per use:
                                  # zmx_close_pane (Ctrl+Shift+Alt+X),
-                                 # zmx_close_tab (Ctrl+Shift+Alt+W),
-                                 # zmx_close_window (Ctrl+Shift+Alt+Q).
+                                 # zmx_close_tab (Ctrl+Shift+Alt+W).
+                                 # Windows have no kill-close mirror:
+                                 # closing one always detaches + records.
                                  # zmx_undo_close (Ctrl+Shift+Z) reopens the
                                  # last closed tab/pane/window (reverse
                                  # order) and re-attaches its still-alive
-                                 # sessions; zmx_kill_unattached (Ctrl+Alt+K)
-                                 # sweeps all detached seance-* sessions.
+                                 # sessions; zmx_kill_unattached
+                                 # (Ctrl+Shift+Alt+K) sweeps all detached
+                                 # seance-* sessions (never foreign zmx
+                                 # sessions, never sessions of panes that
+                                 # are open right now).
 
 [notifications]
 # sound = "default"              # "default", "none", or path to .wav/.ogg file
