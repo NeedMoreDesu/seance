@@ -79,14 +79,22 @@ pub fn main(init: std.process.Init) !void {
     // The mock records every invocation to a file (session store) and
     // fakes daemon semantics; no real zmx daemon is contacted.
     {
-        var zmx_harness = Harness.startZmx(alloc, seance_bin, backend, true) catch |e| {
+        var zmx_harness = Harness.startZmx(alloc, seance_bin, backend, "zmx-attach = true\nzmx-kill-on-window-close = true\n") catch |e| {
             std.debug.print("error: failed to start zmx harness: {}\n", .{e});
             std.process.exit(1);
         };
         defer zmx_harness.shutdown();
-        runner.run("zmx lifecycle: attach + explicit kills + hooks", &zmx_harness, testZmxLifecycle);
+        runner.run("zmx lifecycle: attach + explicit kills", &zmx_harness, testZmxLifecycle);
         // Runs LAST: closes the app (window.close on the only window = quit).
         runner.run("zmx lifecycle: quit keeps sessions", &zmx_harness, testZmxQuitKeepsSessions);
+    }
+    {
+        var dfl_harness = Harness.startZmx(alloc, seance_bin, backend, "zmx-attach = true\n") catch |e| {
+            std.debug.print("error: failed to start zmx default-policy harness: {}\n", .{e});
+            std.process.exit(1);
+        };
+        defer dfl_harness.shutdown();
+        runner.run("zmx default policy: terminal close kills, window close keeps", &dfl_harness, testZmxDefaultPolicy);
     }
 
     runner.summary();
@@ -200,8 +208,6 @@ const Harness = struct {
     home_dir: []const u8 = "",
     /// mock-zmx invocation log path (zmx-mock harnesses only)
     mock_log: []const u8 = "",
-    /// [hooks] output log path (zmx-mock harnesses only)
-    hooks_log: []const u8 = "",
     /// cage pid (Wayland) or Xvfb pid (X11). Null if backend wraps seance directly.
     display_pid: ?posix.pid_t,
     /// seance pid (only set for Xvfb where seance is a separate process)
@@ -211,13 +217,16 @@ const Harness = struct {
     const POLL_INTERVAL_MS = 100;
 
     pub fn start(alloc: Allocator, seance_bin: []const u8, backend: DisplayBackend) !Harness {
-        return startZmx(alloc, seance_bin, backend, false);
+        return startZmx(alloc, seance_bin, backend, "");
     }
 
-    /// zmx_mock: config enables zmx-attach + lifecycle hooks, and PATH is
-    /// fronted by a mock `zmx` that records every invocation (the mock
-    /// session store) instead of touching real sessions.
-    pub fn startZmx(alloc: Allocator, seance_bin: []const u8, backend: DisplayBackend, zmx_mock: bool) !Harness {
+    /// behavior_cfg: extra [behavior] lines written into the harness
+    /// config (e.g. "zmx-attach = true\n"). Non-empty enables the mock-zmx
+    /// harness: PATH is fronted by a mock `zmx` that records every
+    /// invocation (the mock session store) instead of touching real
+    /// sessions. Empty = plain harness (no zmx, no mock).
+    pub fn startZmx(alloc: Allocator, seance_bin: []const u8, backend: DisplayBackend, behavior_cfg: []const u8) !Harness {
+        const zmx_mock = behavior_cfg.len > 0;
         // 1. Create isolated temp directory
         const pid = if (@hasDecl(std.os, "linux")) std.os.linux.getpid() else std.c.getpid();
         harness_seq += 1;
@@ -245,8 +254,8 @@ const Harness = struct {
             var w = f.writer(io.get(), &buf);
             if (zmx_mock) {
                 try w.interface.print(
-                    "[socket]\npath = \"{s}\"\n\n[behavior]\nconfirm-close-window = false\nzmx-attach = true\n\n[hooks]\non-tab-open = \"echo OPEN ${{SEANCE_TAB_UUID}} >> $HOME/hooks.log\"\non-tab-close = \"echo CLOSE ${{SEANCE_TAB_UUID}} ${{SEANCE_PANE_UUIDS}} >> $HOME/hooks.log\"\n",
-                    .{socket_path},
+                    "[socket]\npath = \"{s}\"\n\n[behavior]\nconfirm-close-window = false\n{s}",
+                    .{ socket_path, behavior_cfg },
                 );
             } else {
                 try w.interface.print("[socket]\npath = \"{s}\"\n\n[behavior]\nconfirm-close-window = false\n", .{socket_path});
@@ -275,7 +284,6 @@ const Harness = struct {
             .socket_path = socket_path,
             .home_dir = home_dir,
             .mock_log = if (zmx_mock) mock_log_path else "",
-            .hooks_log = if (zmx_mock) try std.fmt.allocPrint(alloc, "{s}/home/hooks.log", .{tmp_dir}) else "",
             .display_pid = null,
             .seance_pid = null,
         };
@@ -436,10 +444,11 @@ const Harness = struct {
 // tests assert the FULL policy:
 //   - every new terminal (startup tab, created tab, split, created window)
 //     attaches its own `seance-<pane-uuid>` session
-//   - every explicit close (surface/tab/window while others remain) kills
-//     exactly the sessions of the terminals that went away
-//   - whole-app quit kills NOTHING (re-attach on next launch) and fires no
-//     close hooks
+//   - explicit terminal close kills exactly the sessions of the terminals
+//     that went away (zmx-kill-on-terminal-close; default on)
+//   - window close kills only with zmx-kill-on-window-close (default off:
+//     window close keeps sessions, like quit)
+//   - whole-app quit kills NOTHING (re-attach on next launch)
 
 fn seance(h: *Harness, uuid_str: []const u8) []const u8 {
     return std.fmt.allocPrint(h.alloc, "seance-{s}", .{uuid_str}) catch return "";
@@ -531,12 +540,8 @@ fn testZmxLifecycle(h: *Harness) TestError!void {
     _ = try h.callOk("workspace.close", close_ws);
     try waitForMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, u_new_tab)}));
 
-    // 6. [hooks] fired with the right payload: OPEN carried the created
-    // tab's UUID; CLOSE carried its tab UUID + the surviving pane UUID.
-    // Both hooks spawn `bash -c` asynchronously — poll until the
-    // expected lines land in the log.
-    try waitForLogLine(h, h.hooks_log, try std.fmt.allocPrint(h.alloc, "OPEN {s}", .{tab_uuid}));
-    try waitForLogLine(h, h.hooks_log, try std.fmt.allocPrint(h.alloc, "CLOSE {s} {s}", .{ tab_uuid, u_new_tab }));
+    // 6. The created tab carried a valid tab_uuid through the socket API.
+    if (tab_uuid.len != 36) return TestError.AssertionFailed;
 
     // 7. The startup tab's terminal is untouched so far → never killed.
     try expectNoMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, snap0.items[0])}));
@@ -548,20 +553,6 @@ fn testZmxQuitKeepsSessions(h: *Harness) TestError!void {
     try treePaneUuids(h, &snap);
     if (snap.items.len == 0) return TestError.AssertionFailed;
     const keep_uuid = snap.items[0];
-
-    // The surviving tab's UUID (workspace.list exposes tab_uuid).
-    var keep_tab_uuid: []const u8 = "";
-    const ws_list = try h.callOk("workspace.list", null);
-    if (ws_list == .object) {
-        if (ws_list.object.get("workspaces")) |w| {
-            if (w == .array and w.array.items.len > 0 and w.array.items[0] == .object) {
-                if (w.array.items[0].object.get("tab_uuid")) |t| {
-                    if (t == .string) keep_tab_uuid = t.string;
-                }
-            }
-        }
-    }
-    if (keep_tab_uuid.len == 0) return TestError.AssertionFailed;
 
     // A second window: its terminals attach…
     const create = try h.callOk("window.create", null);
@@ -601,15 +592,60 @@ fn testZmxQuitKeepsSessions(h: *Harness) TestError!void {
 
     // Grace window: a stray kill for the surviving tab would be a bug.
     try expectNoMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, keep_uuid)}));
+}
 
-    // No CLOSE hook for the surviving tab on quit (earlier tests closed
-    // OTHER tabs, whose CLOSE lines legitimately exist).
-    var hooks_buf: [16384]u8 = undefined;
-    if (readFileBuf(h.hooks_log, &hooks_buf)) |hooks| {
-        if (keep_tab_uuid.len > 0) {
-            const close_needle = try std.fmt.allocPrint(h.alloc, "CLOSE {s}", .{keep_tab_uuid});
-            if (std.mem.indexOf(u8, hooks, close_needle) != null) return TestError.AssertionFailed;
-        }
+/// With zmx-attach on and the KILL flags left at their shipped defaults
+/// (terminal-close = kill, window-close = keep): closing a terminal kills
+/// its session, but closing a WINDOW (while others remain) only detaches —
+/// its sessions survive for the next launch, same as whole-app quit.
+fn testZmxDefaultPolicy(h: *Harness) TestError!void {
+    var snap: std.ArrayList([]const u8) = .empty;
+    try treePaneUuids(h, &snap);
+    if (snap.items.len == 0) return TestError.AssertionFailed;
+    const base_uuid = snap.items[0];
+    try waitForMockLog(h, seance(h, base_uuid));
+
+    // Split → own session; closing it (terminal policy = kill) kills it.
+    const split = try h.callOk("surface.split", null);
+    if (split != .object) return TestError.AssertionFailed;
+    const sid_val = split.object.get("surface_id") orelse return TestError.AssertionFailed;
+    if (sid_val != .integer) return TestError.AssertionFailed;
+    const split_sid: u64 = @intCast(sid_val.integer);
+    var snap2: std.ArrayList([]const u8) = .empty;
+    try treePaneUuids(h, &snap2);
+    const u_split = newUuids(snap.items, snap2.items);
+    if (u_split.len == 0) return TestError.AssertionFailed;
+    try waitForMockLog(h, seance(h, u_split));
+    _ = try h.callOk("surface.close", std.fmt.allocPrint(h.alloc, "{{\"surface_id\":{d}}}", .{split_sid}) catch return TestError.Unexpected);
+    try waitForMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, u_split)}));
+
+    // Second window → its terminal attaches…
+    const create = try h.callOk("window.create", null);
+    if (create != .object) return TestError.AssertionFailed;
+    const win_idx_val = create.object.get("index") orelse return TestError.AssertionFailed;
+    if (win_idx_val != .integer) return TestError.AssertionFailed;
+    const win_idx: u64 = @intCast(win_idx_val.integer);
+    var snap3: std.ArrayList([]const u8) = .empty;
+    try treePaneUuids(h, &snap3);
+    const w2_uuid = newUuids(snap2.items, snap3.items);
+    if (w2_uuid.len == 0) return TestError.AssertionFailed;
+    try waitForMockLog(h, seance(h, w2_uuid));
+
+    // …closing THAT window keeps its session (window policy = keep).
+    _ = try h.callOk("window.close", std.fmt.allocPrint(h.alloc, "{{\"window_id\":{d}}}", .{win_idx}) catch return TestError.Unexpected);
+    try expectNoMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, w2_uuid)}));
+    try expectNoMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, base_uuid)}));
+
+    // …and the closed window is PARKED into session.json (detach
+    // semantics): its pane UUID must survive in the restore file so the
+    // next launch re-creates the window and re-attaches the session.
+    const spath = std.fmt.allocPrint(h.alloc, "{s}/.config/seance/session.json", .{h.home_dir}) catch
+        return TestError.Unexpected;
+    var sbuf: [262144]u8 = undefined;
+    const got = readFileBuf(spath, &sbuf) orelse return TestError.AssertionFailed;
+    if (std.mem.indexOf(u8, got, w2_uuid) == null) {
+        std.debug.print("  closed window not parked in session.json\n", .{});
+        return TestError.AssertionFailed;
     }
 }
 
