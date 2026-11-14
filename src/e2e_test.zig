@@ -735,6 +735,15 @@ fn waitForUnattached(h: *Harness, want: usize) TestError!void {
     return TestError.Timeout;
 }
 
+/// Assert the current unattached count without polling; used where the
+/// indicator must update synchronously with the API/keypress.
+fn expectUnattached(h: *Harness, want: usize) TestError!void {
+    const status = try h.callOk("zmx.status", null);
+    if (status != .object) return TestError.AssertionFailed;
+    const v = status.object.get("unattached") orelse return TestError.AssertionFailed;
+    if (v != .integer or v.integer != want) return TestError.AssertionFailed;
+}
+
 fn windowCount(h: *Harness) TestError!usize {
     const res = try h.callOk("window.list", null);
     if (res != .object) return TestError.AssertionFailed;
@@ -904,6 +913,9 @@ fn testZmxKillUnattached(h: *Harness) TestError!void {
     try waitForUnattached(h, 1);
 
     _ = try h.callOk("zmx.kill_unattached", null);
+    // The indicator is dismissed synchronously with the sweep call; it must
+    // not wait for the async `zmx list`/kill round-trip.
+    try expectUnattached(h, 0);
     try waitForMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, u_split)}));
 
     // Never the live startup terminal.

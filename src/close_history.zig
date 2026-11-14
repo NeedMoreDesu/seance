@@ -36,6 +36,12 @@ const Allocator = std.mem.Allocator;
 pub const MAX_ENTRIES: usize = 32;
 const SCAN_INTERVAL_SECS: u32 = 5;
 
+/// After a sweep is issued, `zmx kill` runs asynchronously. Rescan on a
+/// short timer (retrying a few times) so the sidebar settles as soon as
+/// the daemons are gone instead of waiting for the next periodic tick.
+const RECONCILE_DELAY_MS: u32 = 150;
+const RECONCILE_TRIES: u8 = 10;
+
 pub const Kind = enum { pane, tab, window };
 
 fn kindName(k: Kind) []const u8 {
@@ -82,7 +88,10 @@ var detached_count: usize = 0;
 
 var scan_in_flight = false;
 var sweep_pending = false;
+var sweep_optimistic = false;
 var scan_timer: c.guint = 0;
+var reconcile_timer: c.guint = 0;
+var reconcile_tries: u8 = 0;
 
 fn allocator() Allocator {
     return gpa.allocator();
@@ -621,6 +630,8 @@ fn onTimer(_: c.gpointer) callconv(.c) c.gboolean {
             detached_count = 0;
             updateSidebars();
         }
+        sweep_optimistic = false;
+        reconcile_tries = 0;
         return 1;
     }
     requestScan(false);
@@ -629,7 +640,7 @@ fn onTimer(_: c.gpointer) callconv(.c) c.gboolean {
 
 /// Kick a `zmx list` scan (worker thread; results land on the main
 /// thread). At most one scan runs at a time; a sweep requested while one
-/// is in flight is served by the next tick.
+/// is in flight is dispatched as soon as that pass finishes.
 pub fn triggerScan() void {
     requestScan(false);
 }
@@ -639,6 +650,16 @@ pub fn triggerScan() void {
 /// not have been spawned yet — restored workspaces attach lazily).
 /// Sessions not spawned by seance (any other name) are never touched.
 pub fn killUnattached() void {
+    if (!config_mod.get().zmx_attach) return;
+    // The user just asked to destroy every detached session, so dismiss
+    // the indicator immediately instead of leaving it up through the
+    // `zmx list` round-trip and the async kills. The post-sweep reconcile
+    // scan restores the real count if anything refused to die.
+    if (detached_count != 0) {
+        detached_count = 0;
+        updateSidebars();
+    }
+    sweep_optimistic = true;
     requestScan(true);
 }
 
@@ -724,14 +745,68 @@ fn onScanIdle(data: c.gpointer) callconv(.c) c.gboolean {
 
     var det_buf: [16384]u8 = undefined;
     const detached = zmx.detachedUuidList(rows.items, owned.items, &det_buf);
-    detached_count = zmx.detachedCount(rows.items, owned.items);
-    updateSidebars();
 
-    if (work.sweep and detached.len > 0) {
-        WindowState.killZmxSessions(detached);
-        // Kill is async; chain a fresh scan so count + prune settle.
-        requestScan(false);
+    const count = zmx.detachedCount(rows.items, owned.items);
+    const sweeping = work.sweep or sweep_pending;
+
+    // While kills settle, keep the optimistic zero from killUnattached()
+    // instead of repainting a scan that raced them. Only show the real
+    // count once it is zero or the retries are exhausted.
+    if (sweep_optimistic or sweeping) {
+        if (count == 0) {
+            sweep_optimistic = false;
+            reconcile_tries = 0;
+            detached_count = 0;
+            updateSidebars();
+        } else if (work.sweep) {
+            if (detached.len > 0) WindowState.killZmxSessions(detached);
+            scheduleReconcile(RECONCILE_TRIES);
+        } else if (sweep_pending) {
+            // The queued sweep (dispatched below) owns the result.
+        } else if (reconcile_tries > 0) {
+            reconcile_tries -= 1;
+            if (reconcile_tries > 0) {
+                scheduleReconcile(reconcile_tries);
+            } else {
+                sweep_optimistic = false;
+                detached_count = count;
+                updateSidebars();
+            }
+        } else {
+            sweep_optimistic = false;
+            detached_count = count;
+            updateSidebars();
+        }
+    } else {
+        detached_count = count;
+        updateSidebars();
     }
+
+    // A sweep requested while this scan was in flight must not wait for the
+    // next periodic tick.
+    if (sweep_pending) requestScan(false);
+    return 0;
+}
+
+/// Queue a scan for shortly after the async sweeps. `tries` bounds how
+/// many times a still-nonzero count reschedules itself.
+fn scheduleReconcile(tries: u8) void {
+    if (tries == 0) return;
+    if (tries > reconcile_tries) reconcile_tries = tries;
+    if (reconcile_timer != 0) return;
+    reconcile_timer = c.g_timeout_add(RECONCILE_DELAY_MS, @ptrCast(&onReconcile), null);
+}
+
+fn onReconcile(_: c.gpointer) callconv(.c) c.gboolean {
+    reconcile_timer = 0;
+    if (reconcile_tries == 0) return 0;
+    if (scan_in_flight) {
+        // A periodic scan owns the slot; retry shortly (bounded).
+        reconcile_tries -= 1;
+        scheduleReconcile(reconcile_tries);
+        return 0;
+    }
+    requestScan(false);
     return 0;
 }
 
