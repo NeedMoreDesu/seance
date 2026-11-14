@@ -322,29 +322,12 @@ pub const PaneGroup = struct {
         // Suppress signals during reparenting.
         self.programmatic_close = true;
 
-        // Ref all panel widgets before removing them from AdwTabView.
+        // Ref all panel widgets so they survive page disposal below.
         for (self.panels.items) |panel| {
             _ = c.g_object_ref(@ptrCast(panel.getWidget()));
         }
 
-        // Directly unparent each panel widget from the AdwTabView's internal
-        // container rather than using adw_tab_view_close_page (which can
-        // leave the widget parented in an internal container and schedule
-        // deferred cleanup on repeated enter/exit cycles).
-        // Unparenting directly is safe because we hold an extra ref.
-        for (self.panels.items) |panel| {
-            const w = panel.getWidget();
-            if (c.gtk_widget_get_parent(w) != null) {
-                c.gtk_widget_unparent(w);
-            }
-        }
-
-        // Close the now-stale (childless) pages immediately.  Widgets are
-        // parentless at this point, so page dispose's gtk_widget_unparent
-        // is a no-op.  Without this, the AdwTabView retains pages whose
-        // dispose will later unparent widgets that have since been moved
-        // to GtkFixed (e.g. after an expel moves a panel to another group
-        // and the source column is destroyed, finalizing this tab_view).
+        // Close every page before moving the panel widgets.
         var stale_n = c.adw_tab_view_get_n_pages(self.tab_view);
         while (stale_n > 0) {
             const page = c.adw_tab_view_get_nth_page(self.tab_view, 0);
@@ -361,6 +344,17 @@ pub const PaneGroup = struct {
         const n_f: f64 = @floatFromInt(self.panels.items.len);
         for (self.panels.items, 0..) |panel, i| {
             const w = panel.getWidget();
+            // A page that outlives close_page (AdwTabView may keep it via the
+            // tab bar) still has an AdwBin retaining this widget as its raw
+            // child.  Clear it through the bin API, otherwise the bin's later
+            // dispose would unparent the panel from GtkFixed.
+            if (c.gtk_widget_get_parent(w)) |parent| {
+                if (c.g_type_check_instance_is_a(@ptrCast(parent), c.adw_bin_get_type()) != 0) {
+                    c.adw_bin_set_child(@ptrCast(@alignCast(parent)), null);
+                } else {
+                    c.gtk_widget_unparent(w);
+                }
+            }
             c.gtk_fixed_put(@ptrCast(fixed), w, 0, 0);
             _ = c.g_object_unref(@ptrCast(w));
             if (panel.asTerminal()) |pane| {
@@ -404,9 +398,7 @@ pub const PaneGroup = struct {
         // Suppress signals while cleaning up stale pages and re-adding panels.
         self.programmatic_close = true;
 
-        // Clean up stale (childless) pages left by enterStackedMode.
-        // enterStackedMode unparents widgets directly without close_page,
-        // so the tab_view may still have page objects with no children.
+        // Clean up any pages that outlived enterStackedMode.
         var stale_n = c.adw_tab_view_get_n_pages(self.tab_view);
         while (stale_n > 0) {
             const page = c.adw_tab_view_get_nth_page(self.tab_view, 0);

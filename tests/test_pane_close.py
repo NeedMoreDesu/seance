@@ -41,6 +41,18 @@ class PaneCloseTests(keyboard.PhysicalKeyboardTestCase):
         time.sleep(1)
         self.close_last_pane()
 
+    def test_repeated_layout_toggle_with_multiple_tabs_stays_alive(self):
+        self.run_x("xdotool", "key", "ctrl+shift+t")
+        self.run_x("xdotool", "key", "ctrl+shift+t")
+        self.app.wait(lambda: len(self.app.call("surface.list")["surfaces"]) == 3,
+                      "three stacked tabs")
+        for _ in range(4):
+            self.run_x("xdotool", "key", "ctrl+shift+l")
+            time.sleep(1)
+            self.assertIsNone(self.app.process.poll(), "layout toggle crashed the app")
+        self.app.log.seek(0)
+        self.assertNotIn("CRITICAL", self.app.log.read())
+
     def test_close_last_pane_with_pane_shortcut(self):
         self.close_last_pane("ctrl+shift+x")
 
