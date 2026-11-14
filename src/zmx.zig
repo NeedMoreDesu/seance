@@ -58,20 +58,29 @@ pub fn socketExists(runtime_dir: []const u8, pane_uuid: []const u8) bool {
 pub const SessionRow = struct {
     pane_uuid: [uuid.len]u8,
     clients: u32,
+    /// False when `zmx list` reports the daemon as unreachable
+    /// (`status=unreachable` / `err=...`). The socket file may still exist
+    /// (stale), but the session cannot be attached or revived.
+    reachable: bool = true,
 };
 
 /// Parse `zmx list` output: tab-separated kv lines such as
-/// `  name=seance-<uuid>\tpid=1\tclients=0\t...`. Only rows whose name is
-/// exactly `seance-<valid uuid>` are collected — the sweep must never
-/// touch sessions seance did not spawn.
+/// `  name=seance-<uuid>\tpid=1\tclients=0\t...`. The currently active
+/// session is prefixed with an arrow (`→ name=...`), which is stripped.
+/// Only rows whose name is exactly `seance-<valid uuid>` are collected —
+/// the sweep must never touch sessions seance did not spawn.
 pub fn parseListSessions(alloc: std.mem.Allocator, output: []const u8) !std.ArrayList(SessionRow) {
     var rows: std.ArrayList(SessionRow) = .empty;
     var lines = std.mem.splitScalar(u8, output, '\n');
     while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
+        var line = std.mem.trim(u8, raw, " \t\r");
+        // Active-session marker: UTF-8 "→".
+        const arrow = "\xe2\x86\x92";
+        if (std.mem.startsWith(u8, line, arrow)) line = std.mem.trimStart(u8, line[arrow.len..], " \t");
         if (line.len == 0) continue;
         var id: ?[uuid.len]u8 = null;
         var clients: u32 = 0;
+        var reachable = true;
         var fields = std.mem.splitScalar(u8, line, '\t');
         while (fields.next()) |field| {
             if (std.mem.startsWith(u8, field, "name=")) {
@@ -86,9 +95,13 @@ pub fn parseListSessions(alloc: std.mem.Allocator, output: []const u8) !std.Arra
                 }
             } else if (std.mem.startsWith(u8, field, "clients=")) {
                 clients = std.fmt.parseInt(u32, field["clients=".len..], 10) catch 0;
+            } else if (std.mem.startsWith(u8, field, "status=")) {
+                if (std.mem.eql(u8, field["status=".len..], "unreachable")) reachable = false;
+            } else if (std.mem.startsWith(u8, field, "err=")) {
+                reachable = false;
             }
         }
-        if (id) |u| try rows.append(alloc, .{ .pane_uuid = u, .clients = clients });
+        if (id) |u| try rows.append(alloc, .{ .pane_uuid = u, .clients = clients, .reachable = reachable });
     }
     return rows;
 }
@@ -120,6 +133,19 @@ pub fn detachedCount(rows: []const SessionRow, owned: []const [uuid.len]u8) usiz
     var n: usize = 0;
     for (rows) |r| {
         if (r.clients != 0) continue;
+        if (isOwned(&r.pane_uuid, owned)) continue;
+        n += 1;
+    }
+    return n;
+}
+
+/// Count of detached, not-otherwise-owned sessions whose daemon is
+/// unreachable. Their stale sockets cannot be attached or revived; the
+/// sweep kills them like any other detached session.
+pub fn unreachableDetachedCount(rows: []const SessionRow, owned: []const [uuid.len]u8) usize {
+    var n: usize = 0;
+    for (rows) |r| {
+        if (r.reachable or r.clients != 0) continue;
         if (isOwned(&r.pane_uuid, owned)) continue;
         n += 1;
     }
@@ -189,7 +215,7 @@ test "normalizeUuidList drops garbage and reflows spaces" {
 
 test "parseListSessions: real-shape output, seance-only, client counts" {
     // Fixture mirrors `zmx list` (v0.8.1): indented tab-separated kv lines.
-    const out = "  name=seance-20b9c01d-881f-4a2f-bb75-ac5a3d34ed43\tpid=85292\tclients=0\tcreated=1794347621\tcwd=/home/mika\tcmd=bash --posix\tpane=20b9c01d-881f-4a2f-bb75-ac5a3d34ed43\ttab=b115f8a9" ++
+    const out = "\xe2\x86\x92 name=seance-20b9c01d-881f-4a2f-bb75-ac5a3d34ed43\tpid=85292\tclients=0\tcreated=1794347621\tcwd=/home/mika\tcmd=bash --posix\tpane=20b9c01d-881f-4a2f-bb75-ac5a3d34ed43\ttab=b115f8a9" ++
         "\n  name=scratch\tpid=99\tclients=2" ++
         "\n  name=seance-42cb94ae-100d-4d0e-9a3c-d36aad7545dd\tpid=178626\tclients=1\tcreated=1794362446\tcwd=/home\tcmd=bash\tpane=42cb94ae" ++
         "\n  name=seance-not-a-uuid\tpid=1\tclients=0" ++
@@ -200,6 +226,8 @@ test "parseListSessions: real-shape output, seance-only, client counts" {
     try testing.expectEqual(@as(usize, 2), rows.items.len);
     try testing.expectEqual(@as(u32, 0), rows.items[0].clients);
     try testing.expectEqual(@as(u32, 1), rows.items[1].clients);
+    try testing.expect(rows.items[0].reachable);
+    try testing.expect(rows.items[1].reachable);
 
     var owned: [1][uuid.len]u8 = undefined;
     @memcpy(&owned[0], "20b9c01d-881f-4a2f-bb75-ac5a3d34ed43");
@@ -220,6 +248,29 @@ test "parseListSessions: real-shape output, seance-only, client counts" {
     // empty list → empty string
     try testing.expectEqualStrings("", detachedUuidList(&.{}, none[0..], &buf));
     try testing.expectEqual(@as(usize, 0), detachedCount(&.{}, none[0..]));
+}
+
+test "parseListSessions: unreachable rows are flagged, still counted/swept" {
+    const out = "  name=seance-20b9c01d-881f-4a2f-bb75-ac5a3d34ed43\terr=Timeout\tstatus=unreachable" ++
+        "\n  name=seance-42cb94ae-100d-4d0e-9a3c-d36aad7545dd\tpid=178626\tclients=0" ++
+        "\n  name=seance-7c2f3e4d-5a6b-4c8d-9e0f-1a2b3c4d5e6f\tpid=1\tclients=0\terr=Timeout\tstatus=unreachable\n";
+    const alloc = testing.allocator;
+    var rows = try parseListSessions(alloc, out);
+    defer rows.deinit(alloc);
+    try testing.expectEqual(@as(usize, 3), rows.items.len);
+    try testing.expect(!rows.items[0].reachable);
+    try testing.expect(rows.items[1].reachable);
+    try testing.expect(!rows.items[2].reachable);
+
+    const none: [0][uuid.len]u8 = .{};
+    try testing.expectEqual(@as(usize, 3), detachedCount(rows.items, none[0..]));
+    try testing.expectEqual(@as(usize, 2), unreachableDetachedCount(rows.items, none[0..]));
+    // Unreachable stale sessions are still swept (kill --force removes them).
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "20b9c01d-881f-4a2f-bb75-ac5a3d34ed43 42cb94ae-100d-4d0e-9a3c-d36aad7545dd 7c2f3e4d-5a6b-4c8d-9e0f-1a2b3c4d5e6f",
+        detachedUuidList(rows.items, none[0..], &buf),
+    );
 }
 
 test "allUuidList: includes attached and detached sessions" {

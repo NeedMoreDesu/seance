@@ -203,15 +203,19 @@ pub const Sidebar = struct {
 
     /// Show "unattached zmx session(s): N" above the footer, or hide the
     /// row when N is 0 (kept in sync by the close-history scan).
-    pub fn setZmxUnattached(self: *Sidebar, count: usize) void {
+    /// `unreachable_n` is a subset of `count` shown in parentheses.
+    pub fn setZmxUnattached(self: *Sidebar, count: usize, unreachable_n: usize) void {
         const row = self.zmx_row orelse return;
         if (count == 0) {
             c.gtk_widget_set_visible(row, 0);
             return;
         }
-        var buf: [64:0]u8 = [_:0]u8{0} ** 64;
+        var buf: [128:0]u8 = [_:0]u8{0} ** 128;
         const noun = if (count == 1) "session" else "sessions";
-        const text = std.fmt.bufPrintZ(&buf, "unattached zmx {s}: {d}", .{ noun, count }) catch return;
+        const text = if (unreachable_n > 0)
+            std.fmt.bufPrintZ(&buf, "unattached zmx {s}: {d} ({d} unreachable)", .{ noun, count, unreachable_n }) catch return
+        else
+            std.fmt.bufPrintZ(&buf, "unattached zmx {s}: {d}", .{ noun, count }) catch return;
         c.gtk_label_set_text(@ptrCast(row), text);
         c.gtk_widget_set_visible(row, 1);
     }

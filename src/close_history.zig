@@ -85,6 +85,13 @@ var loaded = false;
 
 /// Latest `zmx list` detached-session count (clients=0, seance- prefix).
 var detached_count: usize = 0;
+/// Subset of `detached_count` whose daemon is unreachable (stale socket).
+var unreachable_count: usize = 0;
+
+/// Latest successful scan rows. Kept so record()/undoLast() can reject
+/// sessions the daemon reports as unreachable without another round-trip.
+var scan_rows: std.ArrayList(zmx.SessionRow) = .empty;
+var have_scan = false;
 
 var scan_in_flight = false;
 var sweep_pending = false;
@@ -143,6 +150,7 @@ pub fn record(args: RecordArgs) void {
     var toks = std.mem.tokenizeScalar(u8, normed, ' ');
     var any_alive = false;
     while (toks.next()) |u| {
+        if (knownUnreachable(u)) continue;
         if (zmx.socketExists(runtime_dir, u)) {
             any_alive = true;
             break;
@@ -196,6 +204,11 @@ pub fn undoLast() bool {
     while (entries.items.len > 0) {
         const e = entries.orderedRemove(entries.items.len - 1);
         popped = true;
+        if (allKnownUnreachable(e)) {
+            std.log.warn("close_history: dropping unreachable entry (kind={s})", .{kindName(e.kind)});
+            freeEntry(e);
+            continue;
+        }
         if (revive(&e)) {
             freeEntry(e);
             revived = true;
@@ -230,10 +243,42 @@ fn entryRevivable(e: Entry, rows: []const zmx.SessionRow) bool {
     var toks = std.mem.tokenizeScalar(u8, e.sessions, ' ');
     while (toks.next()) |u| {
         for (rows) |r| {
-            if (std.mem.eql(u8, &r.pane_uuid, u)) return true;
+            if (r.reachable and std.mem.eql(u8, &r.pane_uuid, u)) return true;
         }
     }
     return false;
+}
+
+/// True when the last scan explicitly reported this session unreachable.
+/// Sessions merely absent from the list are dead (pruned by `prune`), but
+/// a fresh close may predate the next scan — so only an explicit
+/// unreachable verdict blocks record/undo.
+fn knownUnreachable(u: []const u8) bool {
+    if (!have_scan) return false;
+    for (scan_rows.items) |r| {
+        if (!r.reachable and std.mem.eql(u8, &r.pane_uuid, u)) return true;
+    }
+    return false;
+}
+
+/// True when every session of the entry is known unreachable (no shell can
+/// re-attach). Such an entry is dropped by undo without attempting a revive.
+fn allKnownUnreachable(e: Entry) bool {
+    if (!have_scan) return false;
+    var toks = std.mem.tokenizeScalar(u8, e.sessions, ' ');
+    var any = false;
+    while (toks.next()) |u| {
+        any = true;
+        if (!knownUnreachable(u)) return false;
+    }
+    return any;
+}
+
+fn replaceScanRows(rows: []const zmx.SessionRow) void {
+    const a = allocator();
+    scan_rows.clearRetainingCapacity();
+    scan_rows.appendSlice(a, rows) catch {};
+    have_scan = true;
 }
 
 // ── Persistence ─────────────────────────────────────────────────────────
@@ -626,8 +671,9 @@ pub fn start() void {
 fn onTimer(_: c.gpointer) callconv(.c) c.gboolean {
     if (!config_mod.get().zmx_attach) {
         // Feature off: hide the sidebar indicator and stop scanning.
-        if (detached_count != 0) {
+        if (detached_count != 0 or unreachable_count != 0) {
             detached_count = 0;
+            unreachable_count = 0;
             updateSidebars();
         }
         sweep_optimistic = false;
@@ -655,8 +701,9 @@ pub fn killUnattached() void {
     // the indicator immediately instead of leaving it up through the
     // `zmx list` round-trip and the async kills. The post-sweep reconcile
     // scan restores the real count if anything refused to die.
-    if (detached_count != 0) {
+    if (detached_count != 0 or unreachable_count != 0) {
         detached_count = 0;
+        unreachable_count = 0;
         updateSidebars();
     }
     sweep_optimistic = true;
@@ -766,7 +813,9 @@ fn onScanIdle(data: c.gpointer) callconv(.c) c.gboolean {
     a.free(work.output);
 
     // Presence in the list = daemon alive (attached or detached).
-    // Everything else in the history is dead memory — drop it.
+    // Everything else in the history is dead memory — drop it. Rows
+    // flagged unreachable keep their stale socket but cannot revive.
+    replaceScanRows(rows.items);
     if (prune(rows.items)) save();
 
     // Sessions of panes that are OPEN right now must never count or die:
@@ -780,6 +829,7 @@ fn onScanIdle(data: c.gpointer) callconv(.c) c.gboolean {
     const detached = zmx.detachedUuidList(rows.items, owned.items, &det_buf);
 
     const count = zmx.detachedCount(rows.items, owned.items);
+    const unreachable_n = zmx.unreachableDetachedCount(rows.items, owned.items);
     const sweeping = work.sweep or sweep_pending;
 
     // While kills settle, keep the optimistic zero from killUnattached()
@@ -790,6 +840,7 @@ fn onScanIdle(data: c.gpointer) callconv(.c) c.gboolean {
             sweep_optimistic = false;
             reconcile_tries = 0;
             detached_count = 0;
+            unreachable_count = 0;
             updateSidebars();
         } else if (work.sweep) {
             if (detached.len > 0) WindowState.killZmxSessions(detached);
@@ -803,15 +854,18 @@ fn onScanIdle(data: c.gpointer) callconv(.c) c.gboolean {
             } else {
                 sweep_optimistic = false;
                 detached_count = count;
+                unreachable_count = unreachable_n;
                 updateSidebars();
             }
         } else {
             sweep_optimistic = false;
             detached_count = count;
+            unreachable_count = unreachable_n;
             updateSidebars();
         }
     } else {
         detached_count = count;
+        unreachable_count = unreachable_n;
         updateSidebars();
     }
 
@@ -869,10 +923,12 @@ fn livePaneUuids(a: Allocator) std.ArrayList([uuid.len]u8) {
 fn updateSidebars() void {
     const Window = @import("window.zig");
     const wm = Window.window_manager orelse return;
-    const n = if (config_mod.get().zmx_attach) detached_count else 0;
+    const enabled = config_mod.get().zmx_attach;
+    const n = if (enabled) detached_count else 0;
+    const unreachable_n = if (enabled) @min(unreachable_count, n) else 0;
     for (wm.windows.items) |st| {
         if (st.destroyed) continue;
-        st.sidebar.setZmxUnattached(n);
+        st.sidebar.setZmxUnattached(n, unreachable_n);
     }
 }
 
@@ -970,4 +1026,93 @@ test "prune keeps entries with any live session, drops dead ones" {
     const no_rows: []const zmx.SessionRow = &.{};
     try testing.expect(prune(no_rows));
     try testing.expectEqual(@as(usize, 0), entries.items.len);
+}
+
+test "prune drops entries whose only session is unreachable" {
+    loaded = true; // don't touch the real file from a unit test
+    defer loaded = false;
+    const a = gpa.allocator();
+    entries.clearRetainingCapacity();
+
+    entries.append(a, .{
+        .kind = .pane,
+        .closed_at = 0,
+        .window_id = 0,
+        .tab_uuid = null,
+        .index = 0,
+        .col_width = 0,
+        .col_tabbed = false,
+        .sessions = try a.dupe(u8, "0f8fad5b-d9cb-469f-a165-70867728950e"),
+        .json = try a.dupe(u8, "{}"),
+    }) catch return error.TestUnexpectedResult;
+
+    var stale: [uuid.len]u8 = undefined;
+    @memcpy(&stale, "0f8fad5b-d9cb-469f-a165-70867728950e");
+    var rows = std.ArrayList(zmx.SessionRow).empty;
+    defer rows.deinit(a);
+    // The stale socket still shows up in `zmx list`, but the daemon is
+    // unreachable: it cannot revive, so the history entry must go.
+    try rows.append(a, .{ .pane_uuid = stale, .clients = 0, .reachable = false });
+
+    try testing.expect(prune(rows.items));
+    try testing.expectEqual(@as(usize, 0), entries.items.len);
+}
+
+test "allKnownUnreachable: only explicit unreachable verdicts block undo" {
+    loaded = true;
+    defer loaded = false;
+    have_scan = true;
+    defer {
+        have_scan = false;
+        scan_rows.clearRetainingCapacity();
+    }
+    const a = gpa.allocator();
+    scan_rows.clearRetainingCapacity();
+
+    var alive: [uuid.len]u8 = undefined;
+    @memcpy(&alive, "0f8fad5b-d9cb-469f-a165-70867728950e");
+    var stale: [uuid.len]u8 = undefined;
+    @memcpy(&stale, "1234abcd-12ab-469f-a165-70867728950f");
+    try scan_rows.append(a, .{ .pane_uuid = alive, .clients = 1, .reachable = true });
+    try scan_rows.append(a, .{ .pane_uuid = stale, .clients = 0, .reachable = false });
+
+    const stale_entry: Entry = .{
+        .kind = .pane,
+        .closed_at = 0,
+        .window_id = 0,
+        .tab_uuid = null,
+        .index = 0,
+        .col_width = 0,
+        .col_tabbed = false,
+        .sessions = @constCast("1234abcd-12ab-469f-a165-70867728950f"),
+        .json = @constCast("{}"),
+    };
+    try testing.expect(allKnownUnreachable(stale_entry));
+
+    const alive_entry: Entry = .{
+        .kind = .pane,
+        .closed_at = 0,
+        .window_id = 0,
+        .tab_uuid = null,
+        .index = 0,
+        .col_width = 0,
+        .col_tabbed = false,
+        .sessions = @constCast("0f8fad5b-d9cb-469f-a165-70867728950e"),
+        .json = @constCast("{}"),
+    };
+    try testing.expect(!allKnownUnreachable(alive_entry));
+
+    // A fresh close absent from the last scan is not "known unreachable".
+    const fresh_entry: Entry = .{
+        .kind = .pane,
+        .closed_at = 0,
+        .window_id = 0,
+        .tab_uuid = null,
+        .index = 0,
+        .col_width = 0,
+        .col_tabbed = false,
+        .sessions = @constCast("99999999-8888-4777-8666-555555555555"),
+        .json = @constCast("{}"),
+    };
+    try testing.expect(!allKnownUnreachable(fresh_entry));
 }
