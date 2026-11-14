@@ -395,17 +395,13 @@ pub const WindowState = struct {
     /// as it was — doomed pane included. Must live in ONE stack variable
     /// (uuids slices into its own buffer; never copy the struct).
     const WsPre = struct {
-        tab: [uuid.len]u8 = [_]u8{0} ** uuid.len,
-        has_tab: bool = false,
         uuids_buf: [4096]u8 = undefined,
         uuids: []const u8 = "",
         json: ?[]u8 = null,
 
-        fn capture(self: *WsPre, alloc: std.mem.Allocator, ws: *Workspace) void {
-            self.tab = ws.tab_uuid;
-            self.has_tab = true;
+        fn capture(self: *WsPre, alloc: std.mem.Allocator, ws: *Workspace, want_json: bool) void {
             self.uuids = ws.collectPaneUuids(&self.uuids_buf);
-            self.json = session_mod.captureWorkspaceJson(alloc, ws);
+            if (want_json) self.json = session_mod.captureWorkspaceJson(alloc, ws);
         }
 
         fn deinit(self: *WsPre, alloc: std.mem.Allocator) void {
@@ -425,13 +421,18 @@ pub const WindowState = struct {
         const grp = ws.focusedGroup();
         var doomed_uuid: ?[uuid.len]u8 = null;
         var panel_json: ?[]u8 = null;
+        defer if (panel_json) |j| self.alloc.free(j);
         var ctx: PaneCtx = .{};
         if (grp) |g| {
             if (g.getActivePanel()) |p| {
                 if (p.asTerminal()) |tp| doomed_uuid = tp.pane_uuid;
             }
         }
-        const will_empty_ws = keep and ws.willEmptyAfterPaneClose();
+        // Capture the whole workspace before a close that takes the last
+        // pane with it, in BOTH modes: the keep path needs the full
+        // snapshot, the kill path needs the doomed UUIDs (the tab is gone
+        // by the time closeWorkspaceCap could collect them).
+        const will_empty_ws = cfg.zmx_attach and ws.willEmptyAfterPaneClose();
         if (keep and !will_empty_ws) {
             ctx = PaneCtx.forGroup(ws, grp);
             if (grp) |g| {
@@ -444,21 +445,20 @@ pub const WindowState = struct {
         var pre_buf: WsPre = .{};
         var have_pre = false;
         if (will_empty_ws) {
-            pre_buf.capture(self.alloc, ws);
+            pre_buf.capture(self.alloc, ws, keep);
             have_pre = true;
         }
+        defer if (have_pre) pre_buf.deinit(self.alloc);
 
         const ws_empty = ws.closeTabInFocusedGroup();
 
         if (ws_empty) {
             if (have_pre) {
-                defer pre_buf.deinit(self.alloc);
                 self.closeWorkspaceCap(self.active_workspace, &pre_buf);
             } else {
                 self.closeWorkspace(self.active_workspace);
             }
         } else if (doomed_uuid) |u| {
-            defer if (panel_json) |j| self.alloc.free(j);
             if (u[0] != 0) {
                 self.zmxTargetClosed(.pane, ws.tab_uuid, ctx.col_index, ctx.col_width, ctx.col_tabbed, u[0..], panel_json);
             }
@@ -681,6 +681,7 @@ pub const WindowState = struct {
 
         const will_empty_ws = cfg.zmx_attach and ws.willEmptyAfterPaneClose();
         var panel_json: ?[]u8 = null;
+        defer if (panel_json) |j| self.alloc.free(j);
         var ctx: PaneCtx = .{};
         if (keep and !will_empty_ws) {
             if (active_panel) |p| {
@@ -691,10 +692,11 @@ pub const WindowState = struct {
         }
         var pre_buf: WsPre = .{};
         var have_pre = false;
-        if (will_empty_ws and !zmx_kill_mode) {
-            pre_buf.capture(self.alloc, ws);
+        if (will_empty_ws) {
+            pre_buf.capture(self.alloc, ws, keep);
             have_pre = true;
         }
+        defer if (have_pre) pre_buf.deinit(self.alloc);
 
         const ws_empty = ws.closeFocusedPane();
         // Purge notifications for the closed pane
@@ -703,14 +705,12 @@ pub const WindowState = struct {
         }
         if (ws_empty) {
             if (have_pre) {
-                defer pre_buf.deinit(self.alloc);
                 self.closeWorkspaceCap(self.active_workspace, &pre_buf);
             } else {
                 self.closeWorkspace(self.active_workspace);
             }
         } else {
             if (closed_uuid) |u| {
-                defer if (panel_json) |j| self.alloc.free(j);
                 if (u[0] != 0) {
                     self.zmxTargetClosed(.pane, ws.tab_uuid, ctx.col_index, ctx.col_width, ctx.col_tabbed, u[0..], panel_json);
                 }
@@ -768,6 +768,7 @@ pub const WindowState = struct {
                 grp.panels.items.len == 1 and ws.liveColumnCount() == 1;
 
             var panel_json: ?[]u8 = null;
+            defer if (panel_json) |j| self.alloc.free(j);
             var ctx: PaneCtx = .{};
             if (keep and !will_empty_ws) {
                 if (doomed_panel) |p| {
@@ -778,10 +779,11 @@ pub const WindowState = struct {
             }
             var pre_buf: WsPre = .{};
             var have_pre = false;
-            if (will_empty_ws and !zmx_kill_mode) {
-                pre_buf.capture(self.alloc, ws);
+            if (will_empty_ws) {
+                pre_buf.capture(self.alloc, ws, keep);
                 have_pre = true;
             }
+            defer if (have_pre) pre_buf.deinit(self.alloc);
 
             ws.clearPaneHistoryFor(pane_id);
 
@@ -795,7 +797,6 @@ pub const WindowState = struct {
                 }
                 ws.applyLayout();
                 if (doomed_uuid) |u| {
-                    defer if (panel_json) |j| self.alloc.free(j);
                     if (u[0] != 0) {
                         self.zmxTargetClosed(.pane, ws.tab_uuid, ctx.col_index, ctx.col_width, ctx.col_tabbed, u[0..], panel_json);
                     }
@@ -807,14 +808,12 @@ pub const WindowState = struct {
             const ws_empty = ws.removeColumnByGroupId(grp.id);
             if (ws_empty) {
                 if (have_pre) {
-                    defer pre_buf.deinit(self.alloc);
                     self.closeWorkspaceCap(ws_idx, &pre_buf);
                 } else {
                     self.closeWorkspace(ws_idx);
                 }
             } else {
                 if (doomed_uuid) |u| {
-                    defer if (panel_json) |j| self.alloc.free(j);
                     if (u[0] != 0) {
                         self.zmxTargetClosed(.pane, ws.tab_uuid, ctx.col_index, ctx.col_width, ctx.col_tabbed, u[0..], panel_json);
                     }

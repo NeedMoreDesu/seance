@@ -1052,3 +1052,24 @@ test "Keybind.matches: disabled binding never matches" {
     const kb = Keybind{ .key = c.GDK_KEY_v, .ctrl = true, .enabled = false };
     try std.testing.expect(!kb.matches(c.GDK_KEY_v, c.GDK_KEY_v, true, false, false));
 }
+
+test "defaults: zmx close/undo/sweep bindings" {
+    resetToDefaults();
+    var buf: [64]u8 = undefined;
+
+    var n = displayString(.zmx_close_pane, &buf);
+    try std.testing.expectEqualStrings("Ctrl+Shift+Alt+X", buf[0..n]);
+    n = displayString(.zmx_close_tab, &buf);
+    try std.testing.expectEqualStrings("Ctrl+Shift+Alt+W", buf[0..n]);
+    n = displayString(.zmx_undo_close, &buf);
+    try std.testing.expectEqualStrings("Ctrl+Shift+Z", buf[0..n]);
+    n = displayString(.zmx_kill_unattached, &buf);
+    try std.testing.expectEqualStrings("Ctrl+Shift+Alt+K", buf[0..n]);
+
+    // The zmx twins must not shadow their upstream plain-close chords.
+    n = displayString(.close_pane, &buf);
+    try std.testing.expectEqualStrings("Ctrl+Shift+X", buf[0..n]);
+    n = displayString(.close_tab, &buf);
+    try std.testing.expectEqualStrings("Ctrl+Shift+W", buf[0..n]);
+    resetToDefaults();
+}

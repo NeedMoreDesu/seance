@@ -606,7 +606,11 @@ pub fn reviveWindowJson(wm: anytype, win_val: std.json.Value, force: bool) bool 
     };
 
     const state = Window.create(wm) catch return false;
-    wm.windows.append(wm.allocator, state) catch return false;
+    wm.windows.append(wm.allocator, state) catch {
+        state.destroyed = true;
+        c.gtk_window_destroy(@as(*c.GtkWindow, @ptrCast(state.gtk_window)));
+        return false;
+    };
     wm.active_window = state;
 
     // Restore window dimensions. Ignore corrupt values so a bad session
@@ -651,7 +655,10 @@ pub fn reviveWorkspaceInto(state: *WindowState, ws_val: std.json.Value, index: u
     if (target != last) {
         const ws = state.workspaces.items[last];
         _ = state.workspaces.orderedRemove(last);
-        state.workspaces.insert(state.alloc, target, ws) catch {};
+        state.workspaces.insert(state.alloc, target, ws) catch {
+            // Out of memory: at least keep the restored tab reachable.
+            state.workspaces.append(state.alloc, ws) catch {};
+        };
     }
     return true;
 }

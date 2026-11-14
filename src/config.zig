@@ -705,6 +705,7 @@ test "parseToml: terminal cursor shapes" {
 
 test "parseToml: boolean values in behavior section" {
     var cfg = Config{};
+    try std.testing.expectEqual(false, cfg.zmx_attach);
     parseToml(&cfg,
         \\[behavior]
         \\focus-follows-mouse = true
@@ -712,12 +713,14 @@ test "parseToml: boolean values in behavior section" {
         \\opencode-hooks = false
         \\antigravity-hooks = false
         \\desktop-notifications = false
+        \\zmx-attach = true
     );
     try std.testing.expectEqual(true, cfg.focus_follows_mouse);
     try std.testing.expectEqual(false, cfg.confirm_close_window);
     try std.testing.expectEqual(false, cfg.opencode_hooks);
     try std.testing.expectEqual(false, cfg.antigravity_hooks);
     try std.testing.expectEqual(false, cfg.desktop_notifications);
+    try std.testing.expectEqual(true, cfg.zmx_attach);
 }
 
 test "parseToml: notification sound variants" {

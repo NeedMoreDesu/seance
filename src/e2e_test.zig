@@ -88,6 +88,7 @@ pub fn main(init: std.process.Init) !void {
         defer zmx_harness.shutdown();
         runner.run("zmx lifecycle: attach, keep on close, kill on zmx_kill", &zmx_harness, testZmxLifecycle);
         runner.run("zmx undo close: keep + revive re-attaches", &zmx_harness, testZmxUndoClose);
+        runner.run("zmx tab undo: whole-tab close revives in place", &zmx_harness, testZmxTabUndo);
         runner.run("zmx window close: keeps sessions, prunes session.json, undoable", &zmx_harness, testZmxWindowKeepUndo);
         // Runs LAST: closes the app (window.close on the only window = quit).
         runner.run("zmx lifecycle: quit keeps sessions", &zmx_harness, testZmxQuitKeepsSessions);
@@ -504,6 +505,12 @@ fn waitForHistory(h: *Harness, needle: []const u8, want: bool) TestError!void {
 }
 
 fn testZmxLifecycle(h: *Harness) TestError!void {
+    // 0. Feature reports itself enabled through the socket API.
+    const status = try h.callOk("zmx.status", null);
+    if (status != .object) return TestError.AssertionFailed;
+    const enabled = status.object.get("enabled") orelse return TestError.AssertionFailed;
+    if (enabled != .bool or !enabled.bool) return TestError.AssertionFailed;
+
     // 1. Startup tab's terminal attached its own session.
     var snap0: std.ArrayList([]const u8) = .empty;
     try treePaneUuids(h, &snap0);
@@ -592,6 +599,20 @@ fn testZmxLifecycle(h: *Harness) TestError!void {
     // 6. The created tab carried a valid tab_uuid through the socket API.
     if (tab_uuid.len != 36) return TestError.AssertionFailed;
 
+    // 6b. Kill-closing the LAST pane of a tab must still kill its session:
+    // the workspace cascade has to use the UUIDs captured before teardown,
+    // not collect them from the already-emptied tab.
+    var snap_last: std.ArrayList([]const u8) = .empty;
+    try treePaneUuids(h, &snap_last);
+    _ = try h.callOk("workspace.create", "{\"title\":\"zmx-kill-last\"}");
+    var snap_last2: std.ArrayList([]const u8) = .empty;
+    try treePaneUuids(h, &snap_last2);
+    const u_last = newUuids(snap_last.items, snap_last2.items);
+    if (u_last.len == 0) return TestError.AssertionFailed;
+    try waitForMockLog(h, seance(h, u_last));
+    _ = try h.callOk("surface.close", "{\"zmx_kill\":true}");
+    try waitForMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, u_last)}));
+
     // 7. The startup tab's terminal was never killed.
     try expectNoMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, snap0.items[0])}));
 }
@@ -636,6 +657,82 @@ fn testZmxUndoClose(h: *Harness) TestError!void {
     }
     // The entry was consumed: its snapshot is gone from the history file.
     try waitForHistory(h, u, false);
+}
+
+fn testZmxTabUndo(h: *Harness) TestError!void {
+    // Create a tab, close the WHOLE tab plainly (keep + record), then undo.
+    // This exercises the .tab revive path (reviveWorkspaceInto), not just
+    // the single-pane case: the restored tab returns with its tab_uuid and
+    // its terminal's original pane_uuid.
+    var before: std.ArrayList([]const u8) = .empty;
+    try treePaneUuids(h, &before);
+
+    const created = try h.callOk("workspace.create", "{\"title\":\"zmx-tab-undo\"}");
+    if (created != .object) return TestError.AssertionFailed;
+    const ws_id_val = created.object.get("id") orelse return TestError.AssertionFailed;
+    if (ws_id_val != .integer) return TestError.AssertionFailed;
+    const ws_id: u64 = @intCast(ws_id_val.integer);
+    const tab_uuid_val = created.object.get("tab_uuid") orelse return TestError.AssertionFailed;
+    if (tab_uuid_val != .string) return TestError.AssertionFailed;
+    const tab_uuid = tab_uuid_val.string;
+
+    var after: std.ArrayList([]const u8) = .empty;
+    try treePaneUuids(h, &after);
+    const u = newUuids(before.items, after.items);
+    if (u.len == 0) return TestError.AssertionFailed;
+    try waitForMockLog(h, seance(h, u));
+
+    _ = try h.callOk("workspace.close", std.fmt.allocPrint(h.alloc, "{{\"workspace_id\":{d}}}", .{ws_id}) catch
+        return TestError.Unexpected);
+    try waitForHistory(h, u, true);
+
+    const undo = try h.callOk("zmx.undo_close", null);
+    if (undo != .object) return TestError.AssertionFailed;
+    const revived = undo.object.get("revived") orelse return TestError.AssertionFailed;
+    if (revived != .bool or !revived.bool) {
+        std.debug.print("  tab undo_close did not revive\n", .{});
+        return TestError.AssertionFailed;
+    }
+    if (!try workspaceHasTab(h, tab_uuid)) {
+        std.debug.print("  revived tab_uuid missing from workspace.list\n", .{});
+        return TestError.AssertionFailed;
+    }
+    var after2: std.ArrayList([]const u8) = .empty;
+    try treePaneUuids(h, &after2);
+    if (!uuidInList(after2.items, u)) return TestError.AssertionFailed;
+    try waitForHistory(h, u, false);
+}
+
+fn workspaceHasTab(h: *Harness, tab_uuid: []const u8) TestError!bool {
+    const res = try h.callOk("workspace.list", null);
+    if (res != .object) return TestError.AssertionFailed;
+    const wss = res.object.get("workspaces") orelse return TestError.AssertionFailed;
+    if (wss != .array) return TestError.AssertionFailed;
+    for (wss.array.items) |ws| {
+        if (ws != .object) continue;
+        const t = ws.object.get("tab_uuid") orelse continue;
+        if (t == .string and std.mem.eql(u8, t.string, tab_uuid)) return true;
+    }
+    return false;
+}
+
+/// Poll zmx.status until its unattached count equals `want` (the value
+/// behind the sidebar row is produced asynchronously by the scan worker).
+fn waitForUnattached(h: *Harness, want: usize) TestError!void {
+    var elapsed: u64 = 0;
+    while (elapsed < 20_000) {
+        if (h.callOk("zmx.status", null)) |status| {
+            if (status == .object) {
+                if (status.object.get("unattached")) |v| {
+                    if (v == .integer and v.integer == want) return;
+                }
+            }
+        } else |_| {}
+        io.sleep(POLL_SLEEP_MS * std.time.ns_per_ms);
+        elapsed += POLL_SLEEP_MS;
+    }
+    std.debug.print("  unattached count never reached {d}\n", .{want});
+    return TestError.Timeout;
 }
 
 fn windowCount(h: *Harness) TestError!usize {
@@ -802,12 +899,17 @@ fn testZmxKillUnattached(h: *Harness) TestError!void {
     _ = try h.callOk("surface.close", std.fmt.allocPrint(h.alloc, "{{\"surface_id\":{d}}}", .{split_sid}) catch
         return TestError.Unexpected);
     try waitForHistory(h, u_split, true);
+    // The closed split is now detached and counted for the sidebar row;
+    // the live startup terminal is not.
+    try waitForUnattached(h, 1);
 
     _ = try h.callOk("zmx.kill_unattached", null);
     try waitForMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, u_split)}));
 
     // Never the live startup terminal.
     try expectNoMockLog(h, try std.fmt.allocPrint(h.alloc, "kill --force {s}", .{seance(h, startup_uuid)}));
+    // The follow-up scan drops the swept session from the count.
+    try waitForUnattached(h, 0);
 
     // The next scan prunes the dead entry out of the history.
     var elapsed: u64 = 0;

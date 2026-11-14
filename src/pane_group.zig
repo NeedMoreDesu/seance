@@ -13,7 +13,6 @@ inline fn asWidget(ptr: anytype) *c.GtkWidget {
     return @ptrCast(@alignCast(ptr));
 }
 
-
 pub const PaneGroup = struct {
     pub const FindPanelResult = struct { panel: Panel, index: usize };
 

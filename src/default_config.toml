@@ -43,7 +43,8 @@
                                  # session (named by the pane UUID): survives
                                  # restarts, re-attached on next launch; closes
                                  # keep sessions detached for undo. Needs zmx on
-                                 # PATH. Keybinds: Ctrl+Shift+Alt+X/W kill-close,
+                                 # PATH and the bash shell integration. Keybinds:
+                                 # Ctrl+Shift+Alt+X/W kill-close,
                                  # Ctrl+Shift+Z undo, Ctrl+Shift+Alt+K sweep.
 
 [notifications]
