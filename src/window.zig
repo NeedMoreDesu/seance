@@ -358,7 +358,7 @@ pub const WindowState = struct {
                 .json = snap,
             });
         }
-        close_history.triggerScan();
+        close_history.recheckAfterClose();
     }
 
     /// Column context recorded with a doomed terminal (index/width/mode)

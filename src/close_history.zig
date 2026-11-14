@@ -42,6 +42,13 @@ const SCAN_INTERVAL_SECS: u32 = 5;
 const RECONCILE_DELAY_MS: u32 = 150;
 const RECONCILE_TRIES: u8 = 10;
 
+/// A close keeps its session alive, but the shell detaches from zmx
+/// slightly after the UI teardown. The scan kicked at close time can race
+/// that detach, so recheck on a short timer (a few times) instead of
+/// waiting for the next periodic tick.
+const CLOSE_RECHECK_DELAY_MS: u32 = 150;
+const CLOSE_RECHECK_TRIES: u8 = 8;
+
 pub const Kind = enum { pane, tab, window };
 
 fn kindName(k: Kind) []const u8 {
@@ -99,6 +106,8 @@ var sweep_optimistic = false;
 var scan_timer: c.guint = 0;
 var reconcile_timer: c.guint = 0;
 var reconcile_tries: u8 = 0;
+var close_recheck_timer: c.guint = 0;
+var close_recheck_tries: u8 = 0;
 
 fn allocator() Allocator {
     return gpa.allocator();
@@ -691,6 +700,18 @@ pub fn triggerScan() void {
     requestScan(false);
 }
 
+/// Note that a tab/pane/workspace/window close just completed. Scan now
+/// and recheck shortly after: the UI teardown happens before the closed
+/// shell's zmx client actually goes away, so the first scan can miss the
+/// new detached sessions and leave the sidebar stale until the periodic
+/// tick.
+pub fn recheckAfterClose() void {
+    if (!config_mod.get().zmx_attach) return;
+    triggerScan();
+    close_recheck_tries = CLOSE_RECHECK_TRIES;
+    scheduleCloseRecheck();
+}
+
 /// Kill every detached (`clients=0`) `seance-*` session, except those
 /// belonging to panes that are open right now (their shells may simply
 /// not have been spawned yet — restored workspaces attach lazily).
@@ -894,6 +915,38 @@ fn onReconcile(_: c.gpointer) callconv(.c) c.gboolean {
         return 0;
     }
     requestScan(false);
+    return 0;
+}
+
+/// Queue a recheck after a close so the count reflects the now-detached
+/// shell once zmx has caught up. Bounded: the periodic tick takes over if
+/// the detach is slower than the retry window.
+fn scheduleCloseRecheck() void {
+    if (close_recheck_timer != 0) return;
+    close_recheck_timer = c.g_timeout_add(CLOSE_RECHECK_DELAY_MS, @ptrCast(&onCloseRecheck), null);
+}
+
+fn onCloseRecheck(_: c.gpointer) callconv(.c) c.gboolean {
+    close_recheck_timer = 0;
+    if (close_recheck_tries == 0) return 0;
+    if (!config_mod.get().zmx_attach) {
+        close_recheck_tries = 0;
+        return 0;
+    }
+    close_recheck_tries -= 1;
+    if (sweep_optimistic or sweep_pending) {
+        // The sweep's own reconcile owns the count; extra scans here would
+        // fight its optimistic zero.
+        close_recheck_tries = 0;
+        return 0;
+    }
+    if (scan_in_flight) {
+        // An in-flight scan may already have observed the detach; retry.
+        scheduleCloseRecheck();
+        return 0;
+    }
+    requestScan(false);
+    if (close_recheck_tries > 0) scheduleCloseRecheck();
     return 0;
 }
 

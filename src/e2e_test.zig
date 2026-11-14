@@ -719,8 +719,12 @@ fn workspaceHasTab(h: *Harness, tab_uuid: []const u8) TestError!bool {
 /// Poll zmx.status until its unattached count equals `want` (the value
 /// behind the sidebar row is produced asynchronously by the scan worker).
 fn waitForUnattached(h: *Harness, want: usize) TestError!void {
+    return waitForUnattachedWithin(h, want, 20_000);
+}
+
+fn waitForUnattachedWithin(h: *Harness, want: usize, timeout_ms: u64) TestError!void {
     var elapsed: u64 = 0;
-    while (elapsed < 20_000) {
+    while (elapsed < timeout_ms) {
         if (h.callOk("zmx.status", null)) |status| {
             if (status == .object) {
                 if (status.object.get("unattached")) |v| {
@@ -909,8 +913,9 @@ fn testZmxKillUnattached(h: *Harness) TestError!void {
         return TestError.Unexpected);
     try waitForHistory(h, u_split, true);
     // The closed split is now detached and counted for the sidebar row;
-    // the live startup terminal is not.
-    try waitForUnattached(h, 1);
+    // the live startup terminal is not. Must update well before the 5s
+    // periodic tick, proving the close-triggered recheck.
+    try waitForUnattachedWithin(h, 1, 3_000);
 
     _ = try h.callOk("zmx.kill_unattached", null);
     // The indicator is dismissed synchronously with the sweep call; it must
