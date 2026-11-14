@@ -322,9 +322,8 @@ pub const Pane = struct {
 
     pub fn clearScrollback(self: *Pane) void {
         if (self.surface) |s| {
-            // Send clear screen escape sequences through ghostty
-            const seq = "\x1b[H\x1b[2J\x1b[3J";
-            c.ghostty_surface_text(s, seq, seq.len);
+            const action = "clear_screen";
+            _ = c.ghostty_surface_binding_action(s, action, action.len);
         }
     }
 
