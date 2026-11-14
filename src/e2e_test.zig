@@ -846,7 +846,7 @@ fn spawnSeanceNative(
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(alloc, &.{"env"});
     try argv.appendSlice(alloc, &scrub_env_args);
-    try argv.appendSlice(alloc, &.{"GDK_BACKEND=x11"});  
+    try argv.appendSlice(alloc, &.{"GDK_BACKEND=x11"});
 
     try argv.appendSlice(alloc, extra_env);
     try argv.appendSlice(alloc, &.{ xdg_config_arg, run_dir_arg, cache_dir_arg, home_dir_arg, "NO_AT_BRIDGE=1", "DBUS_SESSION_BUS_ADDRESS=disabled:", seance_bin });
@@ -926,7 +926,7 @@ fn spawnSeanceX11(
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(alloc, &.{"env"});
     try argv.appendSlice(alloc, &scrub_env_args);
-    try argv.appendSlice(alloc, &.{display_arg, "GDK_BACKEND=x11", "LIBGL_ALWAYS_SOFTWARE=1"});
+    try argv.appendSlice(alloc, &.{ display_arg, "GDK_BACKEND=x11", "LIBGL_ALWAYS_SOFTWARE=1" });
     try argv.appendSlice(alloc, extra_env);
     try argv.appendSlice(alloc, &.{
         xdg_config_arg,

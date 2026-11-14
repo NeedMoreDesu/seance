@@ -75,6 +75,10 @@ Every action is available through `seance ctl`, which talks to the running insta
 
 A bundled [skill file](skills/seance-skill.md) provides AI agents with a complete reference for the `seance ctl` API, so they can use the multiplexer on their own.
 
+### Terminal persistence with zmx
+
+Set `zmx-attach = true` under `[behavior]` (requires the `zmx` binary on PATH) and every terminal runs inside its own persistent zmx session, named by a per-pane UUID. Sessions outlive Séance: the next launch re-attaches each terminal to its own session, scrollback and running programs included. Closing a pane, tab, or window keeps its sessions detached and remembers the close; **Undo Tab Close** (`Ctrl+Shift+Z`) reopens the last closed item and re-attaches it. The kill-close shortcuts (`Ctrl+Shift+Alt+X/W`) close the same things but destroy their sessions, and `Ctrl+Shift+Alt+K` sweeps detached `seance-*` sessions. Quitting Séance never kills anything. A sidebar row counts unattached sessions awaiting undo or cleanup.
+
 ### And also
 
 Workspaces, session persistence across restarts, tabs within columns, a command palette, focus-follows-mouse, and no telemetry. Press **F11** to toggle fullscreen, or choose **Toggle Fullscreen** in the command palette. The header bar hides in fullscreen and returns when you exit.

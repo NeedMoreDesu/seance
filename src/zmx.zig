@@ -19,19 +19,10 @@ const uuid = @import("uuid.zig");
 
 pub const session_prefix = "seance-";
 
-/// "seance-<pane-uuid>" into buf; returns null if buf is too small.
-pub fn sessionName(pane_uuid: *const [uuid.len]u8, buf: []u8) ?[]const u8 {
-    if (buf.len < session_prefix.len + uuid.len) return null;
-    return std.fmt.bufPrint(buf, "{s}{s}", .{ session_prefix, pane_uuid[0..] }) catch null;
-}
-
-/// Max length of a single generated kill command (the spawner caps commands
-/// at 1024 chars; leave headroom and chunk larger inputs across commands).
-pub const max_cmd_len = 1000;
-
 /// Kill-one-each command template. The pane-UUID list is passed out-of-band
 /// via SEANCE_PANE_UUIDS (space-separated) so a 200-pane tab still fits in
-/// the command buffer and the envp size limit protects the tail case.
+/// the 1024-char command cap of the spawner and the envp size limit
+/// protects the tail case.
 pub const kill_cmd_env =
     \\for u in $SEANCE_PANE_UUIDS; do zmx kill --force "seance-$u" & done; wait; exit 0
 ;
@@ -164,18 +155,6 @@ pub fn normalizeUuidList(list: []const u8, buf: []u8) ?[]const u8 {
 }
 
 const testing = std.testing;
-
-test "sessionName formats pane sessions" {
-    const u = "0f8fad5b-d9cb-469f-a165-70867728950e";
-    var buf: [64]u8 = undefined;
-    const got = sessionName(@ptrCast(u[0..36]), &buf).?;
-    try testing.expectEqualStrings("seance-0f8fad5b-d9cb-469f-a165-70867728950e", got);
-    // exact-size buffer works, smaller fails
-    var tight: [43]u8 = undefined;
-    _ = sessionName(@ptrCast(u[0..36]), &tight).?;
-    var small: [42]u8 = undefined;
-    try testing.expect(sessionName(@ptrCast(u[0..36]), &small) == null);
-}
 
 test "normalizeUuidList drops garbage and reflows spaces" {
     const good = "0f8fad5b-d9cb-469f-a165-70867728950e";

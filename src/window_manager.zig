@@ -100,14 +100,10 @@ pub const WindowManager = struct {
 
         // Other windows still open — safe to clean up ghostty surfaces
         // since the main loop is still running for the remaining windows.
-        // Window close under the zmx feature ALWAYS keeps the window's
-        // sessions alive (detach, like quitting) and records the full
-        // window snapshot in the CLOSE HISTORY — a separate file, never
-        // session.json — so one undo can revive the window into this
-        // run. There is no kill-close variant for windows by design:
-        // destroying orphans is the kill-unattached sweep's job. A closed
-        // window is pruned from session.json; whole-app quit never
-        // reaches this branch.
+        // Close-history record BEFORE teardown: the window detaches its
+        // sessions (like quitting) and is revivable while they live. It is
+        // pruned from session.json as upstream — this file, not the
+        // restore data, holds the revive memory.
         {
             const cfg = @import("config.zig").get();
             if (cfg.zmx_attach) {

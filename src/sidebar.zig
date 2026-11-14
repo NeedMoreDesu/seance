@@ -44,7 +44,7 @@ pub const Sidebar = struct {
     // adw_header_bar.  Null in CSD mode or when the button bar is disabled.
     footer: ?*c.GtkWidget = null,
 
-    // "unattached zmx session: N" line, docked at the bottom of the
+    // "unattached zmx session(s): N" line, docked at the bottom of the
     // sidebar directly above the footer row (or the sidebar's bottom edge
     // in CSD). Visible only while zmx-attach is on and sessions detach.
     zmx_row: ?*c.GtkWidget = null,
@@ -201,8 +201,8 @@ pub const Sidebar = struct {
         self.notif_overlay = null;
     }
 
-    /// Show "unattached zmx session: N" above the footer, or hide the row
-    /// when N is 0 (kept in sync by the close-history scan).
+    /// Show "unattached zmx session(s): N" above the footer, or hide the
+    /// row when N is 0 (kept in sync by the close-history scan).
     pub fn setZmxUnattached(self: *Sidebar, count: usize) void {
         const row = self.zmx_row orelse return;
         if (count == 0) {
@@ -210,7 +210,8 @@ pub const Sidebar = struct {
             return;
         }
         var buf: [64:0]u8 = [_:0]u8{0} ** 64;
-        const text = std.fmt.bufPrintZ(&buf, "unattached zmx session: {d}", .{count}) catch return;
+        const noun = if (count == 1) "session" else "sessions";
+        const text = std.fmt.bufPrintZ(&buf, "unattached zmx {s}: {d}", .{ noun, count }) catch return;
         c.gtk_label_set_text(@ptrCast(row), text);
         c.gtk_widget_set_visible(row, 1);
     }

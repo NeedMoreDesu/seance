@@ -71,14 +71,11 @@ pub const Config = struct {
     // Antigravity CLI integration
     antigravity_hooks: bool = true,
 
-    // zmx integration: every terminal pane exec's `zmx attach
-    // seance-<pane-uuid>` as its shell, giving each terminal a persistent
-    // session keyed on its UUID (survives seance restarts for re-attach).
-    // Closing a pane/tab/window keeps its session detached and records a
-    // revive snapshot in the close history; explicit kill-close keybinds
-    // and the kill-unattached sweep destroy sessions on demand; a
-    // whole-app quit never kills. Off by default — requires the zmx
-    // binary on PATH.
+    // zmx integration: each terminal pane runs inside `zmx attach
+    // seance-<pane-uuid>`, sessions survive restarts and are re-attached on
+    // the next launch. Closing panes/tabs/windows keeps their sessions
+    // detached and records a revive snapshot in the close history; whole-app
+    // quit kills nothing. Requires zmx on PATH. See zmx.zig for kill policy.
     zmx_attach: bool = false,
 
     // Notifications

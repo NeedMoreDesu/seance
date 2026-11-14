@@ -99,14 +99,6 @@ pub fn captureWorkspaceJson(alloc: Allocator, ws: *Workspace) ?[]u8 {
     return output.toOwnedSlice() catch null;
 }
 
-/// Serialize one panel to an owned JSON object string (close history).
-pub fn capturePanelJson(alloc: Allocator, panel: Panel) ?[]u8 {
-    var output: std.Io.Writer.Allocating = .init(alloc);
-    defer output.deinit();
-    writePanel(&output.writer, panel, false) catch return null;
-    return output.toOwnedSlice() catch null;
-}
-
 /// Close-history snapshot for a batch of doomed terminal panels plus the
 /// column they lived in: `{"col_width":..,"col_layout_mode":..,"panels":[..]}`.
 /// Pass `col_width` <= 0 when the column context is unknown.
@@ -636,7 +628,7 @@ pub fn reviveWindowJson(wm: anytype, win_val: std.json.Value, force: bool) bool 
         return true;
     }
 
-    // Failed to restore - remove phantom window from list.
+    // Failed to restore — remove phantom window from list.
     // Mark destroyed first so onCloseRequest won't re-enter closeWindow.
     state.destroyed = true;
     for (wm.windows.items, 0..) |w, wi| {

@@ -258,11 +258,6 @@ pub const SocketServer = struct {
         if (eql(method, "surface.split")) return handleSurfaceSplit(params, id, buf);
         if (eql(method, "surface.close")) return handleSurfaceClose(params, id, buf);
         if (eql(method, "surface.send_text")) return handleSurfaceSendText(params, id, buf);
-
-        // zmx methods
-        if (eql(method, "zmx.undo_close")) return handleZmxUndoClose(id, buf);
-        if (eql(method, "zmx.kill_unattached")) return handleZmxKillUnattached(id, buf);
-        if (eql(method, "zmx.status")) return handleZmxStatus(id, buf);
         if (eql(method, "surface.send_key")) return handleSurfaceSendKey(params, id, buf);
         if (eql(method, "surface.trigger_flash")) return handleSurfaceTriggerFlash(params, id, buf);
         if (eql(method, "surface.health")) return handleSurfaceHealth(params, id, buf);
@@ -289,6 +284,11 @@ pub const SocketServer = struct {
         if (eql(method, "surface.report_git")) return handleSurfaceReportGit(params, id, buf);
         if (eql(method, "surface.clear_git")) return handleSurfaceClearGit(params, id, buf);
         if (eql(method, "surface.report_state")) return handleSurfaceReportState(params, id, buf);
+
+        // zmx methods
+        if (eql(method, "zmx.undo_close")) return handleZmxUndoClose(id, buf);
+        if (eql(method, "zmx.kill_unattached")) return handleZmxKillUnattached(id, buf);
+        if (eql(method, "zmx.status")) return handleZmxStatus(id, buf);
 
         return writeJsonError(buf, id, "method_not_found", "Unknown method");
     }
@@ -516,8 +516,8 @@ pub const SocketServer = struct {
             "\"surface.send_text\",\"surface.send_key\",\"surface.trigger_flash\",\"surface.health\"," ++
             "\"surface.read_screen\",\"surface.expel\",\"surface.resize_row\",\"surface.reorder\"," ++
             "\"notification.create\",\"notification.list\",\"notification.clear\"," ++
-            "\"zmx.undo_close\",\"zmx.kill_unattached\",\"zmx.status\"," ++
-            "\"surface.report_cwd\",\"surface.report_git\",\"surface.clear_git\",\"surface.report_state\"]";
+            "\"surface.report_cwd\",\"surface.report_git\",\"surface.clear_git\",\"surface.report_state\"," ++
+            "\"zmx.undo_close\",\"zmx.kill_unattached\",\"zmx.status\"]";
         var result_buf: [1024]u8 = undefined;
         const result = std.fmt.bufPrint(&result_buf, "{{\"methods\":{s}}}", .{methods}) catch
             return writeJsonError(buf, id, "internal", "Buffer overflow");
@@ -1085,41 +1085,6 @@ pub const SocketServer = struct {
         defer if (kill) Window.WindowState.setZmxKillMode(false);
         state.closePaneById(surface_id);
         return writeJsonOk(buf, id, "{}");
-    }
-
-    // ── zmx: close history + session sweep ─────────────────────────────
-
-    fn handleZmxUndoClose(id: []const u8, buf: []u8) []const u8 {
-        const close_history = @import("close_history.zig");
-        if (!@import("config.zig").get().zmx_attach) {
-            return writeJsonError(buf, id, "disabled", "zmx-attach is off");
-        }
-        const revived = close_history.undoLast();
-        var result_buf: [64]u8 = undefined;
-        const result = std.fmt.bufPrint(&result_buf, "{{\"revived\":{s}}}", .{if (revived) "true" else "false"}) catch
-            return writeJsonError(buf, id, "internal", "Buffer overflow");
-        return writeJsonOk(buf, id, result);
-    }
-
-    fn handleZmxKillUnattached(id: []const u8, buf: []u8) []const u8 {
-        const close_history = @import("close_history.zig");
-        if (!@import("config.zig").get().zmx_attach) {
-            return writeJsonError(buf, id, "disabled", "zmx-attach is off");
-        }
-        close_history.killUnattached();
-        return writeJsonOk(buf, id, "{\"started\":true}");
-    }
-
-    fn handleZmxStatus(id: []const u8, buf: []u8) []const u8 {
-        const close_history = @import("close_history.zig");
-        const cfg = @import("config.zig").get();
-        var result_buf: [256]u8 = undefined;
-        const result = std.fmt.bufPrint(&result_buf, "{{\"enabled\":{s},\"history\":{d},\"unattached\":{d}}}", .{
-            if (cfg.zmx_attach) "true" else "false",
-            close_history.entryCount(),
-            close_history.unattachedCount(),
-        }) catch return writeJsonError(buf, id, "internal", "Buffer overflow");
-        return writeJsonOk(buf, id, result);
     }
 
     fn handleSurfaceSendText(params: ?std.json.Value, id: []const u8, buf: []u8) []const u8 {
@@ -2058,6 +2023,41 @@ pub const SocketServer = struct {
         const result = findPaneAndWorkspace(surface_id) orelse return writeJsonError(buf, id, "not_found", "Surface not found");
         result.pane.shell_state = shell_state;
         return writeJsonOk(buf, id, "{}");
+    }
+
+    // ── zmx: close history + session sweep ─────────────────────────────
+
+    fn handleZmxUndoClose(id: []const u8, buf: []u8) []const u8 {
+        const close_history = @import("close_history.zig");
+        if (!@import("config.zig").get().zmx_attach) {
+            return writeJsonError(buf, id, "disabled", "zmx-attach is off");
+        }
+        const revived = close_history.undoLast();
+        var result_buf: [64]u8 = undefined;
+        const result = std.fmt.bufPrint(&result_buf, "{{\"revived\":{s}}}", .{if (revived) "true" else "false"}) catch
+            return writeJsonError(buf, id, "internal", "Buffer overflow");
+        return writeJsonOk(buf, id, result);
+    }
+
+    fn handleZmxKillUnattached(id: []const u8, buf: []u8) []const u8 {
+        const close_history = @import("close_history.zig");
+        if (!@import("config.zig").get().zmx_attach) {
+            return writeJsonError(buf, id, "disabled", "zmx-attach is off");
+        }
+        close_history.killUnattached();
+        return writeJsonOk(buf, id, "{\"started\":true}");
+    }
+
+    fn handleZmxStatus(id: []const u8, buf: []u8) []const u8 {
+        const close_history = @import("close_history.zig");
+        const cfg = @import("config.zig").get();
+        var result_buf: [256]u8 = undefined;
+        const result = std.fmt.bufPrint(&result_buf, "{{\"enabled\":{s},\"history\":{d},\"unattached\":{d}}}", .{
+            if (cfg.zmx_attach) "true" else "false",
+            close_history.entryCount(),
+            close_history.unattachedCount(),
+        }) catch return writeJsonError(buf, id, "internal", "Buffer overflow");
+        return writeJsonOk(buf, id, result);
     }
 
     /// Find a pane by panel_id across all windows/workspaces.

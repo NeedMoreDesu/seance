@@ -507,7 +507,7 @@ pub const WindowState = struct {
     /// takes the whole workspace with it) supplies the snapshot + UUID
     /// list captured BEFORE that pane was removed, so the close-history
     /// tab entry still contains it and ONE undo restores the full tab.
-    pub fn closeWorkspaceCap(self: *WindowState, index: usize, pre: ?*WsPre) void {
+    fn closeWorkspaceCap(self: *WindowState, index: usize, pre: ?*WsPre) void {
         if (index >= self.workspaces.items.len) return;
         const ws = self.workspaces.items[index];
 
@@ -701,7 +701,6 @@ pub const WindowState = struct {
         if (pane_id) |pid| {
             _ = self.notif_center.store.removeForPane(pid);
         }
-
         if (ws_empty) {
             if (have_pre) {
                 defer pre_buf.deinit(self.alloc);

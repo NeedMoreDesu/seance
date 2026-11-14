@@ -39,28 +39,12 @@
 # confirm-close-window = true
 # opencode-hooks = true          # track local OpenCode sessions (new panes)
 # antigravity-hooks = true       # track Antigravity CLI sessions (new panes)
-# zmx-attach = false             # every terminal pane execs `zmx attach
-                                 # seance-<pane-uuid>` — persistent sessions
-                                 # per terminal that survive seance restarts
-                                 # (re-attached on next launch). Requires the
-                                 # zmx binary on PATH. Closing a pane/tab/
-                                 # window KEEPS its sessions detached and
-                                 # records the close for undo (separate
-                                 # close-history file, never session.json);
-                                 # quitting kills nothing.
-                                 # Kill-close shortcuts flip that per use:
-                                 # zmx_close_pane (Ctrl+Shift+Alt+X),
-                                 # zmx_close_tab (Ctrl+Shift+Alt+W).
-                                 # Windows have no kill-close mirror:
-                                 # closing one always detaches + records.
-                                 # zmx_undo_close (Ctrl+Shift+Z) reopens the
-                                 # last closed tab/pane/window (reverse
-                                 # order) and re-attaches its still-alive
-                                 # sessions; zmx_kill_unattached
-                                 # (Ctrl+Shift+Alt+K) sweeps all detached
-                                 # seance-* sessions (never foreign zmx
-                                 # sessions, never sessions of panes that
-                                 # are open right now).
+# zmx-attach = false             # run every terminal in its own persistent zmx
+                                 # session (named by the pane UUID): survives
+                                 # restarts, re-attached on next launch; closes
+                                 # keep sessions detached for undo. Needs zmx on
+                                 # PATH. Keybinds: Ctrl+Shift+Alt+X/W kill-close,
+                                 # Ctrl+Shift+Z undo, Ctrl+Shift+Alt+K sweep.
 
 [notifications]
 # sound = "default"              # "default", "none", or path to .wav/.ogg file
