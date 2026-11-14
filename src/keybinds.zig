@@ -77,6 +77,7 @@ pub const Action = enum(u8) {
     new_window,
     toggle_fullscreen,
     quit_app,
+    quit_app_kill_zmx,
 
     // zmx close history / session cleanup
     zmx_undo_close,
@@ -273,6 +274,7 @@ fn initDefaults() void {
     set(.new_window, .{ .key = c.GDK_KEY_N, .ctrl = true, .shift = true });
     set(.toggle_fullscreen, .{ .key = c.GDK_KEY_F11 });
     set(.quit_app, .{ .key = c.GDK_KEY_Q, .ctrl = true, .shift = true });
+    set(.quit_app_kill_zmx, .{ .key = c.GDK_KEY_Q, .ctrl = true, .shift = true, .alt = true });
 
     // Command palette
     set(.open_command_palette, .{ .key = c.GDK_KEY_P, .ctrl = true, .shift = true });
@@ -560,6 +562,7 @@ pub fn executeAction(action: Action, state: *Window.WindowState) c.gboolean {
         },
         .toggle_fullscreen => state.toggleFullscreen(),
         .quit_app => state.quitApp(),
+        .quit_app_kill_zmx => state.quitAppKillZmx(),
 
         // Command palette
         .open_command_palette => state.toggleCommandPalette(),
@@ -1071,5 +1074,22 @@ test "defaults: zmx close/undo/sweep bindings" {
     try std.testing.expectEqualStrings("Ctrl+Shift+X", buf[0..n]);
     n = displayString(.close_tab, &buf);
     try std.testing.expectEqualStrings("Ctrl+Shift+W", buf[0..n]);
+    resetToDefaults();
+}
+
+test "defaults: quit kill-all-zmx binding" {
+    resetToDefaults();
+    var buf: [64]u8 = undefined;
+
+    var n = displayString(.quit_app, &buf);
+    try std.testing.expectEqualStrings("Ctrl+Shift+Q", buf[0..n]);
+    n = displayString(.quit_app_kill_zmx, &buf);
+    try std.testing.expectEqualStrings("Ctrl+Shift+Alt+Q", buf[0..n]);
+
+    // Distinct chord: the destructive quit must not shadow plain quit.
+    const plain = bindings[@intFromEnum(Action.quit_app)];
+    const kill = bindings[@intFromEnum(Action.quit_app_kill_zmx)];
+    try std.testing.expect(!plain.matches(c.GDK_KEY_Q, c.GDK_KEY_Q, true, true, true));
+    try std.testing.expect(kill.matches(c.GDK_KEY_Q, c.GDK_KEY_Q, true, true, true));
     resetToDefaults();
 }

@@ -18,6 +18,9 @@ const is_linux = builtin.os.tag == .linux;
 var wm: ?*WindowManager = null;
 var server: socket_server.SocketServer = .{};
 pub var shutting_down: bool = false;
+/// Set by the quit-and-kill-all shortcut after any confirmation: shutdown
+/// saves the session snapshot first, then destroys every seance zmx session.
+pub var kill_zmx_on_shutdown: bool = false;
 
 pub fn create() *c.AdwApplication {
     if (is_linux) {
@@ -122,6 +125,10 @@ fn onShutdown(_: *c.AdwApplication) callconv(.c) void {
             session.saveAll(manager, true);
         }
     }
+
+    // Explicit quit-and-kill-all: save first (above), then destroy every
+    // seance-* session so no daemons are left behind.
+    if (kill_zmx_on_shutdown) close_history.killAllSessions();
 
     // Clean up scrollback replay temp files
     session.cleanupReplayDir();

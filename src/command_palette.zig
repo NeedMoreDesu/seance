@@ -120,6 +120,7 @@ const static_commands = [_]Command{
     .{ .label = "Reload Configuration", .action = .reload_config, .keywords = "config reload refresh settings" },
     .{ .label = "Toggle Fullscreen", .action = .toggle_fullscreen, .keywords = "fullscreen toggle window maximize f11" },
     .{ .label = "Quit Seance", .action = .quit_app, .keywords = "quit exit close application app shutdown" },
+    .{ .label = "Quit Seance and Kill zmx Sessions", .action = .quit_app_kill_zmx, .keywords = "quit exit close application app shutdown kill destroy zmx sessions" },
 
     // Workspace commands
     .{ .label = "Rename Workspace...", .action = .rename_workspace, .keywords = "rename workspace title name", .enters_rename = true, .visible = .workspace_exists },

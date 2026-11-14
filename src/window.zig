@@ -287,9 +287,9 @@ pub const WindowState = struct {
 
     /// Destroy the zmx sessions of the given terminals (space-separated
     /// UUID list; corrupt tokens dropped). Reached ONLY from explicit kill
-    /// paths: kill-close keybinds/params and the kill-unattached sweep.
-    /// Plain closes never call this; a whole-app quit kills nothing so the
-    /// next seance launch re-attaches to the surviving sessions.
+    /// paths: kill-close keybinds/params, the kill-unattached sweep, and
+    /// quit-and-kill-all. Plain closes never call this; a normal whole-app
+    /// quit kills nothing so the next seance launch re-attaches.
     pub fn killZmxSessions(uuids: []const u8) void {
         const zmx_mod = @import("zmx.zig");
         const cfg = config_mod.get();
@@ -1213,12 +1213,23 @@ pub const WindowState = struct {
     /// warn about (multiple windows or multiple workspaces), shows a single
     /// quit confirmation dialog instead of doing it per-window.
     pub fn quitApp(self: *WindowState) void {
+        self.beginQuit(false);
+    }
+
+    /// Quit AND destroy every zmx session seance owns (attached or
+    /// detached) after the session snapshot is saved. The next launch
+    /// restores the layout but starts fresh shells.
+    pub fn quitAppKillZmx(self: *WindowState) void {
+        self.beginQuit(true);
+    }
+
+    fn beginQuit(self: *WindowState, kill_zmx: bool) void {
         const cfg = config_mod.get();
         if (!cfg.confirm_close_window or !hasInterestingState(self.window_manager)) {
-            triggerQuit(self.window_manager);
+            finishQuit(self.window_manager, kill_zmx);
             return;
         }
-        showQuitConfirmation(self);
+        showQuitConfirmation(self, kill_zmx);
     }
 
     pub fn renameTab(self: *WindowState) void {
@@ -2105,34 +2116,61 @@ fn triggerQuit(wm: *WindowManager) void {
     c.g_application_quit(@as(*c.GApplication, @ptrCast(wm.app)));
 }
 
-fn showQuitConfirmation(state: *WindowState) void {
+fn finishQuit(wm: *WindowManager, kill_zmx: bool) void {
+    if (kill_zmx) @import("app.zig").kill_zmx_on_shutdown = true;
+    triggerQuit(wm);
+}
+
+const QuitDialogCtx = struct {
+    state: *WindowState,
+    kill_zmx: bool,
+};
+
+fn showQuitConfirmation(state: *WindowState, kill_zmx: bool) void {
     const wm = state.window_manager;
     const win_count = wm.windows.items.len;
     var ws_total: usize = 0;
     for (wm.windows.items) |w| ws_total += w.workspaces.items.len;
 
-    var msg_buf: [320:0]u8 = [_:0]u8{0} ** 320;
-    if (win_count > 1) {
+    var msg_buf: [384:0]u8 = [_:0]u8{0} ** 384;
+    if (kill_zmx) {
+        if (win_count > 1) {
+            _ = std.fmt.bufPrint(&msg_buf, "{d} windows and {d} workspaces will be saved. Every zmx session will be destroyed.", .{ win_count, ws_total }) catch {};
+        } else {
+            _ = std.fmt.bufPrint(&msg_buf, "{d} workspaces will be saved. Every zmx session will be destroyed.", .{ws_total}) catch {};
+        }
+    } else if (win_count > 1) {
         _ = std.fmt.bufPrint(&msg_buf, "{d} windows and {d} workspaces will be saved and restored next launch.", .{ win_count, ws_total }) catch {};
     } else {
         _ = std.fmt.bufPrint(&msg_buf, "{d} workspaces will be saved and restored next launch.", .{ws_total}) catch {};
     }
 
-    const dialog = c.adw_alert_dialog_new("Quit Seance?", &msg_buf);
+    const title: [*:0]const u8 = if (kill_zmx) "Quit and kill zmx sessions?" else "Quit Seance?";
+    const confirm_label: [*:0]const u8 = if (kill_zmx) "Quit and Kill" else "Quit";
+
+    const dialog = c.adw_alert_dialog_new(title, &msg_buf);
     c.adw_alert_dialog_add_response(@as(*c.AdwAlertDialog, @ptrCast(dialog)), "cancel", "Cancel");
-    c.adw_alert_dialog_add_response(@as(*c.AdwAlertDialog, @ptrCast(dialog)), "quit", "Quit");
+    c.adw_alert_dialog_add_response(@as(*c.AdwAlertDialog, @ptrCast(dialog)), "quit", confirm_label);
     c.adw_alert_dialog_set_response_appearance(@as(*c.AdwAlertDialog, @ptrCast(dialog)), "quit", c.ADW_RESPONSE_DESTRUCTIVE);
     c.adw_alert_dialog_set_default_response(@as(*c.AdwAlertDialog, @ptrCast(dialog)), "cancel");
     c.adw_alert_dialog_set_close_response(@as(*c.AdwAlertDialog, @ptrCast(dialog)), "cancel");
 
-    _ = c.g_signal_connect_data(@as(c.gpointer, @ptrCast(dialog)), "response", @as(c.GCallback, @ptrCast(&onQuitResponse)), @ptrCast(state), null, 0);
+    const ctx = state.alloc.create(QuitDialogCtx) catch {
+        finishQuit(wm, kill_zmx);
+        return;
+    };
+    ctx.* = .{ .state = state, .kill_zmx = kill_zmx };
+    _ = c.g_signal_connect_data(@as(c.gpointer, @ptrCast(dialog)), "response", @as(c.GCallback, @ptrCast(&onQuitResponse)), @ptrCast(ctx), null, 0);
     c.adw_dialog_present(@as(*c.AdwDialog, @ptrCast(dialog)), state.gtk_window);
 }
 
 fn onQuitResponse(_: *c.AdwAlertDialog, response: [*:0]const u8, data: c.gpointer) callconv(.c) void {
+    const ctx: *QuitDialogCtx = @ptrCast(@alignCast(data));
+    const state = ctx.state;
+    const kill_zmx = ctx.kill_zmx;
+    state.alloc.destroy(ctx);
     if (!std.mem.eql(u8, std.mem.sliceTo(response, 0), "quit")) return;
-    const state: *WindowState = @ptrCast(@alignCast(data));
-    triggerQuit(state.window_manager);
+    finishQuit(state.window_manager, kill_zmx);
 }
 
 fn onWindowFocusChanged(_: *c.GObject, _: ?*anyopaque, data: c.gpointer) callconv(.c) void {

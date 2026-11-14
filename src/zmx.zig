@@ -13,6 +13,7 @@
 //!   - zmx_kill_unattached kills every clients=0 `seance-*` session not
 //!     owned by a currently-open pane
 //!   - WHOLE-APP quit → kill NOTHING (sessions survive for re-attach)
+//!   - quit + kill-all → destroy every `seance-*` session after saving
 
 const std = @import("std");
 const uuid = @import("uuid.zig");
@@ -125,6 +126,23 @@ pub fn detachedCount(rows: []const SessionRow, owned: []const [uuid.len]u8) usiz
     return n;
 }
 
+/// Space-separated UUIDs of EVERY parsed session (attached or detached),
+/// fitting into `buf` (truncated on overflow). Used by quit-and-kill-all.
+pub fn allUuidList(rows: []const SessionRow, buf: []u8) []const u8 {
+    var pos: usize = 0;
+    for (rows) |r| {
+        const need: usize = (if (pos == 0) @as(usize, 0) else 1) + uuid.len;
+        if (pos + need > buf.len) break;
+        if (pos > 0) {
+            buf[pos] = ' ';
+            pos += 1;
+        }
+        @memcpy(buf[pos..][0..uuid.len], &r.pane_uuid);
+        pos += uuid.len;
+    }
+    return buf[0..pos];
+}
+
 fn isOwned(id: *const [uuid.len]u8, owned: []const [uuid.len]u8) bool {
     for (owned) |o| {
         if (std.mem.eql(u8, o[0..], id[0..])) return true;
@@ -202,6 +220,25 @@ test "parseListSessions: real-shape output, seance-only, client counts" {
     // empty list → empty string
     try testing.expectEqualStrings("", detachedUuidList(&.{}, none[0..], &buf));
     try testing.expectEqual(@as(usize, 0), detachedCount(&.{}, none[0..]));
+}
+
+test "allUuidList: includes attached and detached sessions" {
+    const out = "  name=seance-20b9c01d-881f-4a2f-bb75-ac5a3d34ed43\tpid=85292\tclients=0" ++
+        "\n  name=scratch\tpid=99\tclients=2" ++
+        "\n  name=seance-42cb94ae-100d-4d0e-9a3c-d36aad7545dd\tpid=178626\tclients=1" ++
+        "\n  name=seance-not-a-uuid\tpid=1\tclients=0\n";
+    const alloc = testing.allocator;
+    var rows = try parseListSessions(alloc, out);
+    defer rows.deinit(alloc);
+
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "20b9c01d-881f-4a2f-bb75-ac5a3d34ed43 42cb94ae-100d-4d0e-9a3c-d36aad7545dd",
+        allUuidList(rows.items, &buf),
+    );
+    try testing.expectEqualStrings("", allUuidList(&.{}, &buf));
+    var tiny: [10]u8 = undefined;
+    try testing.expectEqualStrings("", allUuidList(rows.items, &tiny));
 }
 
 test "socketExists: uuid shape validation without touching the fs" {

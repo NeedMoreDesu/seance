@@ -3,8 +3,8 @@
 //! close_history.json).
 //!
 //! With [behavior] zmx-attach = true, closing a pane/tab/window keeps its
-//! zmx sessions alive (the daemons outlive the pane shells; the app's quit
-//! path never kills anything). The snapshot needed to REVIVE what was
+//! zmx sessions alive (the daemons outlive the pane shells; the normal quit
+//! path kills nothing). The snapshot needed to REVIVE what was
 //! closed lands in the history, so the "Undo Tab Close (zmx)" keybind can
 //! recreate it and its shells re-attach to the surviving sessions —
 //! browser-style, in reverse close order.
@@ -661,6 +661,39 @@ pub fn killUnattached() void {
     }
     sweep_optimistic = true;
     requestScan(true);
+}
+
+/// Synchronously snapshot every `seance-*` session UUID (attached or
+/// detached) from `zmx list`, space-separated into `buf`. Used by the
+/// quit-and-kill-all shortcut, which cannot wait for the async scan.
+fn allSessionUuids(buf: []u8) []const u8 {
+    const a = allocator();
+    const res = std.process.run(a, io.get(), .{
+        .argv = &[_][]const u8{ "zmx", "list" },
+        .stdout_limit = .limited(4 * 1024 * 1024),
+        .stderr_limit = .limited(64 * 1024),
+    }) catch return buf[0..0];
+    defer a.free(res.stdout);
+    defer a.free(res.stderr);
+    const exited_ok = switch (res.term) {
+        .exited => |code| code == 0,
+        else => false,
+    };
+    if (!exited_ok) return buf[0..0];
+
+    var rows = zmx.parseListSessions(a, res.stdout) catch return buf[0..0];
+    defer rows.deinit(a);
+    return zmx.allUuidList(rows.items, buf);
+}
+
+/// Destroy every zmx session seance owns, attached or detached. Reached
+/// only from the quit-and-kill-all path (after the session snapshot is
+/// saved); the detached kill shell finishes after the app exits.
+pub fn killAllSessions() void {
+    if (!config_mod.get().zmx_attach) return;
+    var buf: [16384]u8 = undefined;
+    const uuids = allSessionUuids(&buf);
+    if (uuids.len > 0) WindowState.killZmxSessions(uuids);
 }
 
 const ScanWork = struct {
