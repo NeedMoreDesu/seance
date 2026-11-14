@@ -44,9 +44,9 @@
                                  # restarts, re-attached on next launch; closes
                                  # keep sessions detached for undo. Needs zmx on
                                  # PATH and the bash shell integration. Keybinds:
-                                 # Ctrl+Shift+Alt+X/W kill-close,
-                                 # Ctrl+Shift+Z undo, Ctrl+Shift+Alt+K sweep,
-                                 # Ctrl+Shift+Alt+Q quit + kill all.
+                                 # Ctrl+Shift+Alt+X/W kill-close, Ctrl+Shift+Z
+                                 # undo, Ctrl+Shift+Alt+K sweep, Ctrl+Shift+Alt+Q
+                                 # quit + kill all.
 
 [notifications]
 # sound = "default"              # "default", "none", or path to .wav/.ogg file

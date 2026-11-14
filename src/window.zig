@@ -274,7 +274,7 @@ pub const WindowState = struct {
     /// zmx_close_tab, or a socket close with zmx_kill=true): the close
     /// paths in scope then DESTROY the sessions they close, instead of
     /// the default keep + record-history. Window closes never enter kill
-    /// mode (no zmx window-close mirror: cleanup is the sweep's job).
+    /// mode; orphan cleanup is the sweep's job.
     var zmx_kill_mode = false;
 
     pub fn setZmxKillMode(on: bool) void {

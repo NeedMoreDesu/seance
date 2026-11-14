@@ -457,7 +457,7 @@ fn buildIntegrationsSection(page: *c.GtkWidget, cfg: *const config_mod.Config) v
     // Card 4: zmx session persistence — master switch, then its keybinds
     // (kept out of the general Keyboard list; visible only when enabled).
     const g4 = newGroup("zmx");
-    c.adw_preferences_group_set_description(@as(*c.AdwPreferencesGroup, @ptrCast(g4)), "zmx keeps each terminal alive in its own session that survives seance restarts (re-attached on next launch). Requires the zmx binary and the bash shell integration. Changes apply to new panes. Closing a pane/tab/window KEEPS its sessions detached and remembers the close for 'Undo Tab Close'; the kill-close shortcuts below close the same things but destroy the sessions instead. Quitting seance normally keeps sessions for re-attach; 'Quit and Kill All' destroys them instead.");
+    c.adw_preferences_group_set_description(@as(*c.AdwPreferencesGroup, @ptrCast(g4)), "zmx keeps each terminal alive in its own session that survives seance restarts (re-attached on next launch). Requires the zmx binary and the bash shell integration. Changes apply to new panes. Closing a pane/tab/window KEEPS its sessions detached and remembers the close for 'Undo Tab Close'; the pane/tab kill-close shortcuts below do the same but destroy the sessions instead. Quitting seance normally keeps sessions for re-attach; 'Quit and Kill All' destroys every session instead.");
     w.zmx_attach = addSwitchRow(g4, "Use zmx sessions", "Every terminal pane runs inside a persistent zmx session named by its UUID.", cfg.zmx_attach);
     for (zmx_shortcut_defs, 0..) |def, i| {
         w.zmx_shortcut_rows[i] = addShortcutRow(g4, def.action, def.label);

@@ -796,8 +796,8 @@ fn testZmxWindowKeepUndo(h: *Harness) TestError!void {
     // …records the FULL window in close_history.json…
     try waitForHistory(h, w2_uuid, true);
 
-    // …and does NOT park it in session.json anymore (closed window is
-    // pruned from the restore file; only the history can bring it back).
+    // …and is NOT kept in session.json anymore (closed window is pruned
+    // from the restore file; only the history can bring it back).
     var sbuf: [262144]u8 = undefined;
     const spath = std.fmt.allocPrint(h.alloc, "{s}/.config/seance/session.json", .{h.home_dir}) catch
         return TestError.Unexpected;
@@ -1205,25 +1205,19 @@ fn readFileBuf(path: []const u8, buf: []u8) ?[]const u8 {
     return buf[0..n];
 }
 
-/// Poll any harness log file until it contains `needle`.
-fn waitForLogLine(h: *Harness, path: []const u8, needle: []const u8) TestError!void {
-    _ = h;
+/// Poll the mock-zmx log until it contains `needle`.
+fn waitForMockLog(h: *Harness, needle: []const u8) TestError!void {
     var buf: [65536]u8 = undefined;
     var elapsed: u64 = 0;
     while (elapsed < 20_000) {
-        if (readFileBuf(path, &buf)) |content| {
+        if (readFileBuf(h.mock_log, &buf)) |content| {
             if (std.mem.indexOf(u8, content, needle) != null) return;
         }
         io.sleep(POLL_SLEEP_MS * std.time.ns_per_ms);
         elapsed += POLL_SLEEP_MS;
     }
-    std.debug.print("  log {s} missing: {s}\n", .{ path, needle });
+    std.debug.print("  log {s} missing: {s}\n", .{ h.mock_log, needle });
     return TestError.Timeout;
-}
-
-/// Poll the mock-zmx log until it contains `needle`.
-fn waitForMockLog(h: *Harness, needle: []const u8) TestError!void {
-    return waitForLogLine(h, h.mock_log, needle);
 }
 
 /// Assert the mock-zmx log does NOT contain `needle` (poll a grace window

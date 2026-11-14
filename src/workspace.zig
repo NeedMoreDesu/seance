@@ -205,8 +205,8 @@ pub const Workspace = struct {
     is_pinned: bool = false,
     port_ordinal: u32 = std.math.maxInt(u32),
     /// Stable per-tab identity: random UUID (36 chars), persisted in
-    /// session.json. Survives restarts so external tools (zmx sessions,
-    /// lifecycle hooks) can key on it. All-zero until minted.
+    /// session.json. Survives restarts so external tools (zmx sessions)
+    /// can key on it. All-zero until minted.
     tab_uuid: [uuid.len]u8 = [_]u8{0} ** uuid.len,
 
     // Sidebar metadata (ephemeral, not persisted)
